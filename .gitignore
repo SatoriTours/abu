@@ -1,0 +1,19 @@
+# Local secrets and runtime data
+.env
+.env.*
+!.env.example
+/secrets/
+/data/
+/artifacts/
+/backend/bin/
+/backend/data/
+.kotlin/
+*.log
+
+# Android / IDE
+.gradle/
+**/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
