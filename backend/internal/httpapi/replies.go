@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,27 +11,43 @@ import (
 	"abu.local/backend/internal/model"
 )
 
+func rolePrompt(instructions string) []model.Message {
+	if strings.TrimSpace(instructions) == "" {
+		return nil
+	}
+	return []model.Message{{Role: "system", Content: instructions}}
+}
+
 func (s *chatStore) reply(w http.ResponseWriter, r *http.Request) {
-	if s.provider == nil {
-		writeJSON(w, 503, map[string]string{"error": "model_not_configured"})
+	if rejectBotQuery(w, r) {
 		return
 	}
 	var input struct {
 		MessageID string `json:"messageId"`
 		Retry     bool   `json:"retry"`
 	}
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2048))
-	decoder.DisallowUnknownFields()
-	if decoder.Decode(&input) != nil || decoder.Decode(new(any)) != io.EOF || input.MessageID == "" {
-		writeJSON(w, 400, map[string]string{"error": "invalid_reply_request"})
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2048))
+	fields, valid := scopedBody(raw, []string{"messageId"}, []string{"retry"})
+	if err != nil || !valid || json.Unmarshal(raw, &input) != nil || input.MessageID == "" || len(input.MessageID) > 128 {
+		apiError(w, 400, "invalid_reply_request")
+		return
+	}
+	bot, ok := s.bots.resolve(w, bodyBotID(fields))
+	if !ok {
+		return
+	}
+	if s.provider == nil {
+		apiError(w, 503, "model_not_configured")
 		return
 	}
 	s.mu.Lock()
-	index := -1
+	index, latest := -1, -1
 	for i, m := range s.messages {
-		if m.ID == input.MessageID {
-			index = i
-			break
+		if m.BotID == bot.ID {
+			latest = i
+			if m.ID == input.MessageID {
+				index = i
+			}
 		}
 	}
 	if index < 0 {
@@ -44,7 +61,7 @@ func (s *chatStore) reply(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, message)
 		return
 	}
-	if s.generating || index != len(s.messages)-1 {
+	if s.generating[bot.ID] || index != latest {
 		s.mu.Unlock()
 		writeJSON(w, 409, map[string]string{"error": "reply_in_progress_or_not_latest"})
 		return
@@ -62,13 +79,17 @@ func (s *chatStore) reply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.messages = next
-	s.generating = true
-	start := len(s.messages) - 20
-	if start < 0 {
-		start = 0
+	s.generating[bot.ID] = true
+	// Limit to the last 20 turns of this role, not the last 20 global records.
+	history := make([]Message, 0, 20)
+	for i := index; i >= 0 && len(history) < 20; i-- {
+		if s.messages[i].BotID == bot.ID {
+			history = append(history, s.messages[i])
+		}
 	}
-	contextMessages := make([]model.Message, 0, 40)
-	for _, m := range s.messages[start:] {
+	contextMessages := rolePrompt(bot.Instructions)
+	for i := len(history) - 1; i >= 0; i-- {
+		m := history[i]
 		contextMessages = append(contextMessages, model.Message{Role: "user", Content: m.Content})
 		if m.ReplyStatus == "completed" {
 			contextMessages = append(contextMessages, model.Message{Role: "assistant", Content: m.Reply})
@@ -76,10 +97,12 @@ func (s *chatStore) reply(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	result, callErr := s.provider.Complete(r.Context(), contextMessages)
+	ctx, cancel := context.WithTimeout(r.Context(), model.DefaultCompletionTimeout)
+	defer cancel()
+	result, callErr := s.provider.Complete(ctx, contextMessages)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	defer func() { s.generating = false }()
+	defer delete(s.generating, bot.ID)
 	next = append([]Message{}, s.messages...)
 	status := http.StatusOK
 	if callErr != nil || strings.TrimSpace(result) == "" || !utf8.ValidString(result) || utf8.RuneCountInString(result) > 4000 {

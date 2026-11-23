@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -69,7 +70,7 @@ func TestChatLoadsMaximumEscapedHistory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "m.json")
 	messages := make([]Message, 200)
 	for i := range messages {
-		messages[i] = Message{ID: "fixture", Content: strings.Repeat("\x01", 4000), Reply: strings.Repeat("\x01", 4000), CreatedAt: "now"}
+		messages[i] = Message{ID: fmt.Sprintf("fixture-%d", i), BotID: "abu", Content: strings.Repeat("\x01", 4000), Reply: strings.Repeat("\x01", 4000), CreatedAt: "now"}
 	}
 	raw, err := json.Marshal(messages)
 	if err != nil {

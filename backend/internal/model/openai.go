@@ -21,6 +21,8 @@ type Message struct {
 	Content string `json:"content"`
 }
 
+const DefaultCompletionTimeout = 45 * time.Second
+
 type Completer interface {
 	Complete(context.Context, []Message) (string, error)
 }
@@ -60,7 +62,7 @@ func NewOpenAI(cfg Config) (*OpenAI, error) {
 	base.RawPath = ""
 	return &OpenAI{
 		endpoint: base.String(), model: cfg.Model, key: cfg.APIKey,
-		client: &http.Client{Timeout: 45 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		client: &http.Client{Timeout: DefaultCompletionTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}, nil
 }
 
@@ -91,10 +93,18 @@ func (c *OpenAI) Complete(ctx context.Context, messages []Message) (string, erro
 	req.Header.Set("Authorization", "Bearer "+c.key)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	response, err := c.client.Do(req)
+	client := c.client
+	if _, bounded := ctx.Deadline(); bounded {
+		// The server supplies a finite per-purpose deadline that covers both headers
+		// and body. Do not impose a second short limit on draft generation.
+		withDeadline := *client
+		withDeadline.Timeout = 0
+		client = &withDeadline
+	}
+	response, err := client.Do(req)
 	if err != nil {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
+		if deadlineErr := completionDeadlineError(ctx, err); deadlineErr != nil {
+			return "", deadlineErr
 		}
 		return "", errors.New("model connection failed or timed out")
 	}
@@ -104,8 +114,8 @@ func (c *OpenAI) Complete(ctx context.Context, messages []Message) (string, erro
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1024*1024+1))
 	if err != nil {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
+		if deadlineErr := completionDeadlineError(ctx, err); deadlineErr != nil {
+			return "", deadlineErr
 		}
 		return "", errors.New("could not read model response")
 	}
@@ -133,4 +143,14 @@ func (c *OpenAI) Complete(ctx context.Context, messages []Message) (string, erro
 		return "", errors.New("model returned an empty reply")
 	}
 	return choice.Message.Content, nil
+}
+
+func completionDeadlineError(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }

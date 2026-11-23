@@ -10,7 +10,13 @@ import kotlinx.coroutines.ensureActive
 import local.abu.data.ChatHistory
 import local.abu.data.ChatMessage
 
-class ChatState {
+internal class ChatSession(val token: String) {
+    private val conversations = mutableMapOf<String, ChatState>()
+
+    fun forBot(botId: String): ChatState = conversations.getOrPut(botId) { ChatState(botId) }
+}
+
+class ChatState(val botId: String = "abu") {
     var draft by mutableStateOf("")
     var pendingId: String? = null
     var pendingText: String? = null
@@ -28,6 +34,7 @@ class ChatState {
     }
 
     fun update(message: ChatMessage) {
+        require(message.botId == botId)
         val index = messages.indexOfFirst { it.id == message.id }
         messages = if (index < 0) messages + message
         else messages.map { if (it.id == message.id) message else it }
@@ -49,11 +56,12 @@ class ChatState {
     }
 
     suspend fun reload(client: ChatClient, token: String) {
-        applyHistory(client.loadHistory(token))
+        applyHistory(client.loadHistory(token, botId))
     }
 
     private suspend fun applyHistory(history: ChatHistory) {
         currentCoroutineContext().ensureActive()
+        require(history.messages.all { it.botId == botId })
         messages = history.messages
         modelConfigured = history.modelConfigured
         historyLoaded = true

@@ -18,23 +18,30 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import local.abu.BuildConfig
+import local.abu.data.Bot
 import local.abu.data.TaskRecord
 import local.abu.data.TaskStatus
 import local.abu.ui.model.TaskRecordLimit
 import local.abu.ui.model.TaskTextLimit
 import local.abu.ui.model.TasksState
+import local.abu.ui.model.TaskKey
+import local.abu.ui.model.key
 
 @Composable
 internal fun TasksScreen(
     state: TasksState,
+    bots: List<Bot>,
     onRefresh: () -> Unit,
-    onSubmit: () -> Unit,
-    onRerun: (String) -> Unit,
-    onCancel: (String) -> Unit,
+    onSubmit: (String) -> Unit,
+    onRerun: (TaskKey) -> Unit,
+    onCancel: (TaskKey) -> Unit,
 ) {
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { onRefresh() }
     var confirmAbandon by remember { mutableStateOf(false) }
     val pending = state.pending
+    val selected = state.selectedBotId
+    var filterOpen by remember { mutableStateOf(false) }
+    fun botName(id: String) = bots.firstOrNull { it.id == id }?.name ?: id
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).imePadding()) {
         LazyColumn(
@@ -52,6 +59,28 @@ internal fun TasksScreen(
                     OutlinedButton(onClick = onRefresh, enabled = state.hasToken && !state.busy) {
                         Text("刷新")
                     }
+                }
+            }
+            item {
+                Box {
+                    OutlinedButton(onClick = { filterOpen = true }, enabled = state.hasToken && !state.busy,
+                        modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text(if (selected == null) "范围：全部角色" else "范围：${botName(selected)}")
+                    }
+                    DropdownMenu(expanded = filterOpen, onDismissRequest = { filterOpen = false }) {
+                        DropdownMenuItem(text = { Text("全部角色") }, onClick = {
+                            state.selectBot(null); filterOpen = false
+                        })
+                        bots.forEach { bot ->
+                            DropdownMenuItem(text = { Text(bot.name) }, onClick = {
+                                state.selectBot(bot.id); filterOpen = false
+                            })
+                        }
+                    }
+                }
+                if (selected == null && pending == null) {
+                    Text("所选范围为全部角色。新建前请选择负责的角色。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             item {
@@ -89,13 +118,14 @@ internal fun TasksScreen(
 
             item {
                 TaskSurface {
-                    Text("单次文本任务", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(if (pending != null) "待确认 · ${botName(pending.botId)}"
+                        else selected?.let { "新建任务 · ${botName(it)}" } ?: "单次文本任务", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     OutlinedTextField(
                         value = pending?.content ?: state.draft,
                         onValueChange = state::edit,
                         label = { Text(if (pending == null) "任务正文" else "待确认正文") },
                         readOnly = state.busy || pending != null,
-                        enabled = state.hasToken,
+                        enabled = state.hasToken && (selected != null || pending != null),
                         minLines = 3,
                         maxLines = 6,
                         isError = pending == null && state.draftLength > TaskTextLimit,
@@ -116,7 +146,8 @@ internal fun TasksScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    Button(onClick = onSubmit, enabled = state.canSubmit) {
+                    val target = pending?.botId ?: selected
+                    Button(onClick = { target?.let(onSubmit) }, enabled = target?.let(state::canSubmitFor) == true) {
                         Text(if (pending == null) "创建任务" else "重试提交")
                     }
                     if (pending != null) {
@@ -130,25 +161,26 @@ internal fun TasksScreen(
             item {
                 Text("任务记录", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             }
-            if (state.tasks.isEmpty()) {
+            if (state.visibleTasks.isEmpty()) {
                 item {
                     val message = when {
                         !state.hasToken -> "应用开发令牌后可读取记录。"
                         state.operation == TasksState.Operation.REFRESH -> "正在从后台加载记录。"
                         state.storageAvailable == null -> "尚未读取记录，可点击刷新。"
-                        else -> "还没有任务"
+                        else -> if (selected == null) "还没有任务" else "这个角色还没有任务"
                     }
                     TaskNotice(message)
                 }
             }
 
-            items(state.tasks.asReversed(), key = { it.id }) { task ->
+            items(state.visibleTasks.asReversed(), key = { "${it.botId}:${it.id}" }) { task ->
                 TaskCard(
                     task = task,
+                    botName = botName(task.botId),
                     canCancel = state.canCancel(task),
                     canRerun = state.canRerun(task),
-                    onCancel = { onCancel(task.id) },
-                    onRerun = { onRerun(task.id) }
+                    onCancel = { onCancel(task.key) },
+                    onRerun = { onRerun(task.key) }
                 )
             }
         }
@@ -176,6 +208,7 @@ internal fun TasksScreen(
 @Composable
 private fun TaskCard(
     task: TaskRecord,
+    botName: String,
     canCancel: Boolean,
     canRerun: Boolean,
     onCancel: () -> Unit,
@@ -196,6 +229,8 @@ private fun TaskCard(
             fontWeight = FontWeight.SemiBold,
             color = if (task.status == TaskStatus.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
         )
+        Text("负责角色：$botName", style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (expanded) {
             SelectionContainer {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -7,8 +7,6 @@ import android.webkit.CookieManager
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
-import android.webkit.ServiceWorkerClient
-import android.webkit.ServiceWorkerController
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebMessage
@@ -23,11 +21,6 @@ import java.io.ByteArrayInputStream
 private const val TodoCsp = "default-src 'none'; script-src 'self'; style-src 'self'; " +
     "connect-src 'none'; worker-src 'none'; child-src 'none'; frame-src 'none'; frame-ancestors 'none'; " +
     "object-src 'none'; form-action 'none'; base-uri 'none'"
-
-private fun blocked() = WebResourceResponse(
-    "text/plain", "UTF-8", 403, "Blocked", mapOf("Cache-Control" to "no-store"),
-    ByteArrayInputStream(byteArrayOf())
-)
 
 @Suppress("DEPRECATION") // Explicitly disable legacy file URL access on supported older Android versions.
 internal class TodoWebView(
@@ -45,7 +38,7 @@ internal class TodoWebView(
     private var pageState = ""
 
     init {
-        initializeWebPolicy()
+        initializeMiniAppWebPolicy()
         settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = false
@@ -80,7 +73,7 @@ internal class TodoWebView(
             override fun shouldOverrideUrlLoading(view: WebView, url: String) = true
 
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse {
-                val path = bundle.pathFor(request.method, request.url.toString(), request.isForMainFrame) ?: return blocked()
+                val path = bundle.pathFor(request.method, request.url.toString(), request.isForMainFrame) ?: return blockedMiniAppRequest()
                 val mime = TodoMime.getValue(path).substringBefore(';')
                 return WebResourceResponse(mime, "UTF-8", 200, "OK", mapOf(
                     "Cache-Control" to "no-store",
@@ -155,25 +148,4 @@ internal class TodoWebView(
         destroy()
     }
 
-    private companion object {
-        var initialized = false
-
-        // A Worker callback has no owning WebView: never route any application resources here.
-        fun initializeWebPolicy() {
-            if (initialized) return
-            setWebContentsDebuggingEnabled(false)
-            CookieManager.getInstance().setAcceptCookie(false)
-            ServiceWorkerController.getInstance().apply {
-                serviceWorkerWebSettings.apply {
-                    blockNetworkLoads = true
-                    allowFileAccess = false
-                    allowContentAccess = false
-                }
-                setServiceWorkerClient(object : ServiceWorkerClient() {
-                    override fun shouldInterceptRequest(request: WebResourceRequest) = blocked()
-                })
-            }
-            initialized = true
-        }
-    }
 }

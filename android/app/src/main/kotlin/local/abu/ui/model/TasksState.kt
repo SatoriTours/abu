@@ -2,6 +2,7 @@ package local.abu.ui.model
 
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -15,13 +16,16 @@ import java.util.UUID
 internal const val TaskTextLimit = 4000
 internal const val TaskRecordLimit = 200
 
+internal data class TaskKey(val botId: String, val id: String)
+internal val TaskRecord.key get() = TaskKey(botId, id)
+
 internal class TasksState(
     private val loadTasks: suspend (String) -> TaskList,
-    private val createTask: suspend (String, String, String) -> TaskDetail,
-    private val cancelTask: suspend (String, String) -> TaskDetail,
+    private val createTask: suspend (String, String, String, String) -> TaskDetail,
+    private val cancelTask: suspend (String, String, String) -> TaskDetail,
     private val newId: () -> String = { UUID.randomUUID().toString() },
 ) {
-    data class Submission(val id: String, val content: String, val fromDraft: Boolean)
+    data class Submission(val id: String, val content: String, val botId: String, val fromDraft: Boolean)
     enum class Operation { REFRESH, SUBMIT, CANCEL }
 
     private var activeToken by mutableStateOf("")
@@ -31,8 +35,11 @@ internal class TasksState(
 
     var tasks by mutableStateOf(emptyList<TaskRecord>())
         private set
-    var draft by mutableStateOf("")
+    private val drafts = mutableStateMapOf<String, String>()
+    var selectedBotId by mutableStateOf<String?>(null)
         private set
+    val draft get() = drafts[selectedBotId].orEmpty()
+    val visibleTasks get() = tasks.filter { selectedBotId == null || it.botId == selectedBotId }
     var pending by mutableStateOf<Submission?>(null)
         private set
     var operation by mutableStateOf<Operation?>(null)
@@ -50,7 +57,16 @@ internal class TasksState(
     val draftLength get() = draft.codePointCount(0, draft.length)
     private val canWrite get() = hasToken && !busy && storageAvailable == true
     private val canCreate get() = canWrite && modelConfigured == true
-    val canSubmit get() = canCreate && (pending != null || (!atCapacity && draft.isNotBlank() && draftLength <= TaskTextLimit))
+    val canSubmit get() = selectedBotId?.let(::canSubmitFor) == true
+    fun canSubmitFor(botId: String): Boolean {
+        if (!canCreate) return false
+        pending?.let { return it.botId == botId }
+        if (selectedBotId != botId) return false
+        val value = drafts[botId].orEmpty()
+        return !atCapacity && value.isNotBlank() && value.codePointCount(0, value.length) <= TaskTextLimit
+    }
+
+    fun selectBot(botId: String?) { selectedBotId = botId }
 
     fun setToken(value: String) {
         if (activeToken == value) return
@@ -59,7 +75,8 @@ internal class TasksState(
         generation++
         refreshRequested = false
         tasks = emptyList()
-        draft = ""
+        drafts.clear()
+        selectedBotId = null
         pending = null
         operation = null
         modelConfigured = null
@@ -69,7 +86,8 @@ internal class TasksState(
     }
 
     fun edit(value: String) {
-        if (!busy && pending == null) draft = value
+        val botId = selectedBotId ?: return
+        if (!busy && (pending == null || pending?.botId != botId)) drafts[botId] = value
     }
 
     fun abandon() {
@@ -102,34 +120,34 @@ internal class TasksState(
         }
     }
 
-    suspend fun submit() {
-        if (!canSubmit) return
-        submit(pending ?: Submission(newId(), draft, fromDraft = true))
+    suspend fun submit(botId: String) {
+        if (!canSubmitFor(botId)) return
+        submit(pending ?: Submission(newId(), drafts[botId].orEmpty(), botId, fromDraft = true))
     }
 
-    suspend fun rerun(id: String) {
-        val task = tasks.firstOrNull { it.id == id } ?: return
+    suspend fun rerun(key: TaskKey) {
+        val task = tasks.firstOrNull { it.key == key } ?: return
         if (!canRerun(task)) return
-        submit(Submission(newId(), task.content, fromDraft = false))
+        submit(Submission(newId(), task.content, task.botId, fromDraft = false))
     }
 
     private suspend fun submit(submission: Submission) {
         pending = submission
-        perform(Operation.SUBMIT, { createTask(it, submission.id, submission.content) }) { response ->
-            if (response.task.id != submission.id || response.task.content != submission.content) {
+        perform(Operation.SUBMIT, { createTask(it, submission.id, submission.content, submission.botId) }) { response ->
+            if (response.task.key != TaskKey(submission.botId, submission.id) || response.task.content != submission.content) {
                 throw TaskException("invalid_response")
             }
             update(response)
-            if (submission.fromDraft) draft = ""
+            if (submission.fromDraft) drafts.remove(submission.botId)
             pending = null
         }
     }
 
-    suspend fun cancel(id: String) {
-        val task = tasks.firstOrNull { it.id == id } ?: return
+    suspend fun cancel(key: TaskKey) {
+        val task = tasks.firstOrNull { it.key == key } ?: return
         if (!canCancel(task)) return
-        perform(Operation.CANCEL, { cancelTask(it, id) }) { response ->
-            if (response.task.id != id) throw TaskException("invalid_response")
+        perform(Operation.CANCEL, { cancelTask(it, key.id, key.botId) }) { response ->
+            if (response.task.key != key) throw TaskException("invalid_response")
             update(response)
         }
     }
@@ -137,7 +155,7 @@ internal class TasksState(
     private fun update(response: TaskDetail) {
         modelConfigured = response.modelConfigured
         storageAvailable = response.storageAvailable
-        val index = tasks.indexOfFirst { it.id == response.task.id }
+        val index = tasks.indexOfFirst { it.key == response.task.key }
         tasks = if (index == -1) {
             (tasks + response.task).takeLast(TaskRecordLimit)
         } else {

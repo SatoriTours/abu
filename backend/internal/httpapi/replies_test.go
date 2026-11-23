@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"abu.local/backend/internal/model"
 )
@@ -35,6 +36,39 @@ func reply(h http.Handler, body string) *httptest.ResponseRecorder {
 	h.ServeHTTP(w, r)
 	return w
 }
+func TestReplyKeepsShortBudgetAndEarlierRequestDeadline(t *testing.T) {
+	for _, caller := range []time.Duration{0, 2 * time.Minute, 2 * time.Second} {
+		provider := taskProviderFunc(func(ctx context.Context, _ []model.Message) (string, error) {
+			deadline, ok := ctx.Deadline()
+			want := 45 * time.Second
+			if caller > 0 && caller < want {
+				want = caller
+			}
+			if remaining := time.Until(deadline); !ok || remaining > want || remaining < want-time.Second {
+				t.Errorf("caller=%s model deadline remaining=%s, want <= %s", caller, remaining, want)
+			}
+			return "reply", nil
+		})
+		h, err := NewChatHandlerWithModel(filepath.Join(t.TempDir(), "m.json"), testToken, provider)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request(h, "POST", `{"id":"one","content":"hello"}`, testToken)
+		r := httptest.NewRequest("POST", "/api/chat/replies", strings.NewReader(`{"messageId":"one"}`))
+		r.Header.Set("Authorization", "Bearer "+testToken)
+		if caller > 0 {
+			ctx, cancel := context.WithTimeout(r.Context(), caller)
+			defer cancel()
+			r = r.WithContext(ctx)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	}
+}
+
 func TestReplyPersistsAndDoesNotRegenerate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "m.json")
 	provider := &fakeCompleter{}

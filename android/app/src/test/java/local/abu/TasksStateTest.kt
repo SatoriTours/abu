@@ -12,6 +12,8 @@ import local.abu.data.TaskList
 import local.abu.data.TaskRecord
 import local.abu.data.TaskStatus
 import local.abu.ui.model.TasksState
+import local.abu.ui.model.TaskKey
+import local.abu.ui.model.key
 import kotlin.test.*
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -26,7 +28,7 @@ class TasksStateTest {
                 if (offline) throw TaskException("connection_failed")
                 TaskList(listOfNotNull(saved), true, true)
             },
-            createTask = { _, id, content ->
+            createTask = { _, id, content, _ ->
                 requests.add(id to content)
                 if (saved == null) {
                     saved = record(id, content)
@@ -34,13 +36,14 @@ class TasksStateTest {
                 }
                 detail(checkNotNull(saved))
             },
-            cancelTask = { _, _ -> error("unexpected cancellation") },
+            cancelTask = { _, _, _ -> error("unexpected cancellation") },
             newId = { "attempt-${requests.size + 1}" }
         )
         state.setToken("first")
+        state.selectBot("abu")
         state.refresh()
         state.edit("  原文\n第二行  ")
-        state.submit()
+        state.submit("abu")
         val pending = assertNotNull(state.pending)
         offline = true
         state.refresh()
@@ -48,7 +51,7 @@ class TasksStateTest {
 
         assertEquals(pending, state.pending)
         assertEquals("  原文\n第二行  ", state.draft)
-        state.submit()
+        state.submit("abu")
 
         assertEquals(List(2) { "attempt-1" to "  原文\n第二行  " }, requests)
         assertEquals(listOf(saved), state.tasks)
@@ -62,7 +65,7 @@ class TasksStateTest {
         val state = stateWith(old)
         state.refresh()
         state.edit("未提交的新草稿")
-        state.rerun(old.id)
+        state.rerun(old.key)
         assertEquals(listOf(old, record("new-id", "任务正文")), state.tasks)
         assertEquals("未提交的新草稿", state.draft)
     }
@@ -75,18 +78,20 @@ class TasksStateTest {
             loadTasks = { token ->
                 if (token == "old") TaskList(emptyList(), true, true) else newList.await()
             },
-            createTask = { _, _, _ -> oldReply.await() },
-            cancelTask = { _, _ -> error("unexpected cancellation") },
+            createTask = { _, _, _, _ -> oldReply.await() },
+            cancelTask = { _, _, _ -> error("unexpected cancellation") },
             newId = { "old-result" },
         )
         state.setToken("old")
+        state.selectBot("abu")
         state.refresh()
         state.edit("旧令牌下的文本")
-        val oldRequest = launch { state.submit() }
+        val oldRequest = launch { state.submit("abu") }
         runCurrent()
         assertNotNull(state.pending)
 
         state.setToken("new")
+        state.selectBot("abu")
         assertNull(state.pending)
         assertEquals("", state.draft)
         state.edit("当前草稿")
@@ -113,7 +118,7 @@ class TasksStateTest {
             detail(completed)
         })
         state.refresh()
-        state.cancel(running.id)
+        state.cancel(running.key)
         assertEquals(listOf(completed), state.tasks)
         assertFalse(state.canCancel(completed))
     }
@@ -123,14 +128,14 @@ class TasksStateTest {
         val state = stateWith()
         state.refresh()
         state.edit("　\n")
-        state.submit()
+        state.submit("abu")
         assertTrue(state.tasks.isEmpty())
         state.edit("💡".repeat(4001))
-        state.submit()
+        state.submit("abu")
         assertTrue(state.tasks.isEmpty())
         val valid = "💡".repeat(4000)
         state.edit(valid)
-        state.submit()
+        state.submit("abu")
         assertEquals(valid, state.tasks.single().content)
     }
 
@@ -141,8 +146,8 @@ class TasksStateTest {
             val state = stateWith(failed, model = model, storage = storage)
             state.refresh()
             state.edit("不发送")
-            state.submit()
-            state.rerun(failed.id)
+            state.submit("abu")
+            state.rerun(failed.key)
             assertEquals(listOf(failed), state.tasks)
             assertFalse(state.canSubmit)
             assertFalse(state.canRerun(failed))
@@ -154,16 +159,17 @@ class TasksStateTest {
         val inFlight = CompletableDeferred<TaskDetail>()
         val state = TasksState(
             loadTasks = { TaskList(emptyList(), true, true) },
-            createTask = { _, _, _ -> inFlight.await() },
-            cancelTask = { _, _ -> error("unexpected cancellation") },
+            createTask = { _, _, _, _ -> inFlight.await() },
+            cancelTask = { _, _, _ -> error("unexpected cancellation") },
         )
         state.setToken("test")
+        state.selectBot("abu")
         state.refresh()
         state.edit("在途")
-        val job = launch { assertFailsWith<CancellationException> { state.submit() } }
+        val job = launch { assertFailsWith<CancellationException> { state.submit("abu") } }
         runCurrent()
         val pending = assertNotNull(state.pending)
-        state.submit() // Cannot launch a duplicate while the first request is suspended.
+        state.submit("abu") // Cannot launch a duplicate while the first request is suspended.
         job.cancel()
         job.join()
         assertFalse(state.busy)
@@ -177,8 +183,8 @@ class TasksStateTest {
         val state = stateWith(*records.toTypedArray())
         state.refresh()
         state.edit("新增")
-        state.submit()
-        state.rerun("record-1")
+        state.submit("abu")
+        state.rerun(TaskKey("abu","record-1"))
         assertEquals(records, state.tasks)
         assertFalse(state.canSubmit)
         assertFalse(state.canRerun(records.first()))
@@ -188,13 +194,14 @@ class TasksStateTest {
     fun abandoningUnconfirmedSubmissionAllowsEditingButDoesNotClearDraft() = runTest {
         val state = TasksState(
             loadTasks = { TaskList(emptyList(), true, true) },
-            createTask = { _, _, _ -> throw TaskException("connection_failed") },
-            cancelTask = { _, _ -> error("unexpected cancellation") },
+            createTask = { _, _, _, _ -> throw TaskException("connection_failed") },
+            cancelTask = { _, _, _ -> error("unexpected cancellation") },
         )
         state.setToken("test")
+        state.selectBot("abu")
         state.refresh()
         state.edit("原文")
-        state.submit()
+        state.submit("abu")
         assertNotNull(state.pending)
         state.abandon()
         assertNull(state.pending)
@@ -210,10 +217,10 @@ class TasksStateTest {
         cancel: suspend (String, String) -> TaskDetail = { _, _ -> error("unexpected cancellation") },
     ) = TasksState(
         loadTasks = { TaskList(records.toList(), model, storage) },
-        createTask = { _, id, content -> detail(record(id, content)) },
-        cancelTask = cancel,
+        createTask = { _, id, content, _ -> detail(record(id, content)) },
+        cancelTask = { token, id, _ -> cancel(token, id) },
         newId = { "new-id" },
-    ).also { it.setToken("test") }
+    ).also { it.setToken("test"); it.selectBot("abu") }
 
     private fun record(id: String, content: String, status: TaskStatus = TaskStatus.QUEUED) =
         TaskRecord(id, content, status, "2026-11-21T00:00:00Z", "2026-11-21T00:00:00Z", null, null)

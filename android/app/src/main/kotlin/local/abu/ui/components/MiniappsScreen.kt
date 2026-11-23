@@ -26,7 +26,7 @@ import local.abu.ui.theme.LocalAbuDark
 import local.abu.miniapps.TodoWebView
 
 @Composable
-internal fun MiniappsScreen(state: TodoState, scope: CoroutineScope) {
+internal fun MiniappsScreen(state: TodoState, scope: CoroutineScope, onDirectoryBack: () -> Unit) {
     val generation = state.generation
     val gate = remember { TodoPortGate() }
     val dark = LocalAbuDark.current
@@ -154,7 +154,7 @@ internal fun MiniappsScreen(state: TodoState, scope: CoroutineScope) {
                         Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("小程序", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        TextButton(onClick = onDirectoryBack) { Text("返回应用中心") }
                         OutlinedButton(
                             onClick = { scope.launch { state.refreshCatalog() } },
                             enabled = state.hasToken && !state.busy

@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application android:networkSecurityConfig="@xml/debug_network_security">
+        <activity android:name=".miniapps.GeneratedHostProbeActivity" android:exported="true"
+            android:process=":generated_probe" android:excludeFromRecents="true"
+            android:taskAffinity="local.abu.generated_probe" />
         <activity
             android:name=".miniapps.probe.MiniAppProbeActivity"
             android:exported="true"

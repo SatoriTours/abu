@@ -129,7 +129,11 @@ internal fun parseAppJson(raw: ByteArray): JsonObject {
 }
 
 // Kotlin's JSON tree retains only the last duplicate key. Check each object before decoding.
-private class AppJsonKeys(private val source: String) {
+internal class AppJsonKeys(
+    private val source: String,
+    private val maxDepth: Int = 8,
+    private val number: (String) -> Boolean = jsonInteger::matches,
+) {
     private var pos = 0
     private val delimiters = " \t\r\n,]}"
     private fun peek(): Char? = source.getOrNull(pos)
@@ -150,7 +154,7 @@ private class AppJsonKeys(private val source: String) {
     }
 
     private fun value(depth: Int) {
-        require(depth <= 8)
+        require(depth <= maxDepth)
         whitespace()
         when (peek()) {
             '{' -> {
@@ -177,7 +181,7 @@ private class AppJsonKeys(private val source: String) {
                 val start = pos
                 while (peek()?.let { it !in delimiters } == true) pos++
                 val token = source.substring(start, pos)
-                require(token == "true" || token == "false" || token == "null" || jsonInteger.matches(token))
+                require(token == "true" || token == "false" || token == "null" || number(token))
             }
         }
     }

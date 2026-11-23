@@ -17,7 +17,6 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import local.abu.BuildConfig
-import local.abu.ui.ChatState
 import local.abu.ui.theme.*
 
 @Composable
@@ -26,8 +25,6 @@ internal fun SettingsScreen(
     onDevTokenChange: (String) -> Unit,
     tokenInput: String,
     onTokenInputChange: (String) -> Unit,
-    chatState: ChatState,
-    onResetChatState: () -> Unit,
     checking: Boolean,
     onCheckHealth: () -> Unit,
     healthMessage: String,
@@ -121,9 +118,8 @@ internal fun SettingsScreen(
                         Button(
                             onClick = {
                                 onDevTokenChange(tokenInput.trim())
-                                onResetChatState()
                             },
-                            enabled = tokenInput.trim().length >= 32 && !chatState.busy
+                            enabled = tokenInput.trim().length >= 32
                         ) {
                             Text("应用令牌")
                         }

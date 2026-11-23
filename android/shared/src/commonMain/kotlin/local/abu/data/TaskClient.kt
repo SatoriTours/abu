@@ -22,6 +22,7 @@ data class TaskRecord(
     val updatedAt: String,
     val result: String?,
     val errorCode: String?,
+    val botId: String = DEFAULT_BOT_ID,
 )
 
 data class TaskDetail(val task: TaskRecord, val modelConfigured: Boolean, val storageAvailable: Boolean)
@@ -36,25 +37,35 @@ class TaskClient(private val client: HttpClient) {
     }
 
     // Callers retain id and content while submission is unconfirmed. Explicit reruns use a new id.
-    suspend fun create(token: String, id: String, content: String): TaskDetail {
+    suspend fun create(token: String, id: String, content: String, botId: String? = null): TaskDetail {
         validateId(id)
+        val scope = botId?.let(::validateBotId) ?: DEFAULT_BOT_ID
         if (content.length > 8_000) throw TaskException("invalid_task")
-        val payload = buildJsonObject { put("id", id); put("content", content) }.toString()
-        return fetch(token, HttpMethod.Post, "", detailLimit, payload, ::parseDetail)
+        val payload = buildJsonObject {
+            put("id", id)
+            put("content", content)
+            if (botId != null) put("botId", scope)
+        }.toString()
+        return fetch(token, HttpMethod.Post, "", detailLimit, payload) { parseDetail(it, scope) }
     }
 
-    suspend fun list(token: String): TaskList =
-        fetch(token, HttpMethod.Get, "", listLimit) { root ->
-            val tasks = root.getValue("tasks").jsonArray
-            require(tasks.size <= 200)
-            TaskList(tasks.map { parseRecord(it.jsonObject) }, root.flag("modelConfigured"), root.flag("storageAvailable"))
-        }
+    suspend fun list(token: String, botId: String? = null): TaskList {
+        val scope = botId?.let(::validateBotId) ?: DEFAULT_BOT_ID
+        return fetch(token, HttpMethod.Get, "", listLimit, queryBot = botId) { parseList(it, scope) }
+    }
 
-    suspend fun detail(token: String, id: String): TaskDetail =
-        fetch(token, HttpMethod.Get, "/${validateId(id)}", detailLimit, parse = ::parseDetail)
+    suspend fun listAll(token: String): TaskList =
+        fetch(token, HttpMethod.Get, "", listLimit, allBots = true) { parseList(it, null) }
 
-    suspend fun cancel(token: String, id: String): TaskDetail =
-        fetch(token, HttpMethod.Post, "/${validateId(id)}/cancel", detailLimit, parse = ::parseDetail)
+    suspend fun detail(token: String, id: String, botId: String? = null): TaskDetail {
+        val scope = botId?.let(::validateBotId) ?: DEFAULT_BOT_ID
+        return fetch(token, HttpMethod.Get, "/${validateId(id)}", detailLimit, queryBot = botId) { parseDetail(it, scope) }
+    }
+
+    suspend fun cancel(token: String, id: String, botId: String? = null): TaskDetail {
+        val scope = botId?.let(::validateBotId) ?: DEFAULT_BOT_ID
+        return fetch(token, HttpMethod.Post, "/${validateId(id)}/cancel", detailLimit, queryBot = botId) { parseDetail(it, scope) }
+    }
 
     private suspend fun <T> fetch(
         token: String,
@@ -62,12 +73,16 @@ class TaskClient(private val client: HttpClient) {
         path: String,
         limit: Long,
         payload: String? = null,
+        queryBot: String? = null,
+        allBots: Boolean = false,
         parse: (JsonObject) -> T,
     ): T = try {
         client.prepareRequest(endpoint + path) {
             method = verb
             expectSuccess = false
             bearerAuth(token)
+            if (queryBot != null) parameter("botId", queryBot)
+            if (allBots) parameter("allBots", "true")
             accept(ContentType.Application.Json)
             if (payload != null) {
                 contentType(ContentType.Application.Json)
@@ -104,15 +119,21 @@ class TaskClient(private val client: HttpClient) {
         throw TaskException("connection_failed")
     }
 
-    private fun parseDetail(root: JsonObject): TaskDetail =
-        TaskDetail(parseRecord(root.getValue("task").jsonObject), root.flag("modelConfigured"), root.flag("storageAvailable"))
+    private fun parseDetail(root: JsonObject, scope: String): TaskDetail =
+        TaskDetail(parseRecord(root.getValue("task").jsonObject, scope), root.flag("modelConfigured"), root.flag("storageAvailable"))
 
-    private fun parseRecord(task: JsonObject): TaskRecord {
+    private fun parseList(root: JsonObject, scope: String?): TaskList {
+        val tasks = root.getValue("tasks").jsonArray
+        require(tasks.size <= 200)
+        return TaskList(tasks.map { parseRecord(it.jsonObject, scope) }, root.flag("modelConfigured"), root.flag("storageAvailable"))
+    }
+
+    private fun parseRecord(task: JsonObject, scope: String?): TaskRecord {
         val status = TaskStatus.valueOf(task.text("status").uppercase())
         val code = task["error"]?.let { task.text("error") }
         require(code == null || code in taskErrors)
         return TaskRecord(validateId(task.text("id")), task.text("content"), status,
-            task.text("createdAt"), task.text("updatedAt"), task["result"]?.let { task.text("result") }, code)
+            task.text("createdAt"), task.text("updatedAt"), task["result"]?.let { task.text("result") }, code, task.responseBotId(scope))
     }
 
     private fun JsonObject.text(key: String): String =
@@ -128,7 +149,7 @@ class TaskClient(private val client: HttpClient) {
         const val detailLimit = 64L * 1024
         const val listLimit = 10L * 1024 * 1024
         val idPattern = Regex("[A-Za-z0-9_-]{1,128}")
-        val httpErrors = setOf("unauthorized", "invalid_task", "body_too_large", "task_not_found",
+        val httpErrors = setOf("unauthorized", "invalid_task", "body_too_large", "task_not_found", "invalid_bot_id", "bot_not_found",
             "id_conflict", "task_limit", "model_not_configured", "storage_unavailable", "shutting_down")
         val taskErrors = setOf("model_failed", "model_timeout", "interrupted", "storage_uncertain")
     }

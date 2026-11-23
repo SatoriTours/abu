@@ -24,6 +24,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import local.abu.data.Bot
 import kotlinx.coroutines.launch
 import local.abu.R
 import local.abu.data.ChatClient
@@ -35,16 +39,18 @@ import local.abu.ui.navigation.AppNavigationState
 import java.util.UUID
 
 @Composable
-fun ChatDetailScreen(client: ChatClient, token: String, state: ChatState, navState: AppNavigationState) {
-    val scope = rememberCoroutineScope()
+internal fun ChatDetailScreen(
+    client: ChatClient, token: String, state: ChatState, navState: AppNavigationState, bot: Bot, scope: CoroutineScope,
+    onApps: () -> Unit,
+) {
     val listState = rememberLazyListState()
     val colors = MaterialTheme.colorScheme
     val keyboard = LocalSoftwareKeyboardController.current
     var refresh by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(state, token, refresh) {
-        if (token.isBlank()) return@LaunchedEffect
-        state.refreshHistory { client.loadHistory(token) }
+        if (token.isBlank() || state.busy) return@LaunchedEffect
+        state.refreshHistory { client.loadHistory(token, state.botId) }
     }
 
     LaunchedEffect(state.messages.size) {
@@ -63,7 +69,9 @@ fun ChatDetailScreen(client: ChatClient, token: String, state: ChatState, navSta
     suspend fun requestReply(id: String, retry: Boolean) {
         state.replyActivity = id
         try {
-            state.acceptReply(client.reply(token, id, retry))
+            val reply = client.reply(token, id, retry, state.botId)
+            currentCoroutineContext().ensureActive()
+            state.acceptReply(reply)
         } finally {
             state.replyActivity = null
         }
@@ -82,7 +90,8 @@ fun ChatDetailScreen(client: ChatClient, token: String, state: ChatState, navSta
         scope.launch {
             var saved = false
             try {
-                val message = client.send(token, id, content)
+                val message = client.send(token, id, content, state.botId)
+                currentCoroutineContext().ensureActive()
                 state.update(message)
                 state.draft = ""
                 state.pendingId = null
@@ -110,13 +119,16 @@ fun ChatDetailScreen(client: ChatClient, token: String, state: ChatState, navSta
                 Icon(painterResource(R.drawable.ic_arrow_back), "返回对话列表")
             }
             BotAvatar(
-                size = 44.dp, animate = true,
+                size = 44.dp, avatar = bot.avatar, animate = true,
                 working = state.replyActivity != null || state.messages.lastOrNull()?.replyStatus == "running",
                 completed = state.justCompletedReply,
             )
             Column(Modifier.weight(1f).padding(start = 5.dp)) {
-                Text("阿布", style = MaterialTheme.typography.titleMedium)
+                Text(bot.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                 Text("你的日常小搭子", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            }
+            IconButton(onClick = { keyboard?.hide(); onApps() }, enabled = token.isNotBlank()) {
+                Icon(painterResource(R.drawable.ic_tab_apps), "此角色的小程序操作")
             }
             TextButton(onClick = { refresh++ }, enabled = token.isNotBlank() && !state.busy) { Text("刷新") }
         }
@@ -144,14 +156,14 @@ fun ChatDetailScreen(client: ChatClient, token: String, state: ChatState, navSta
                     }
                     when {
                         msg.replyStatus == "completed" -> {
-                            ReplyHeading()
+                            ReplyHeading(bot)
                             SelectionContainer(Modifier.padding(start = 34.dp)) {
                                 Text(msg.reply, style = MaterialTheme.typography.bodyLarge)
                             }
                         }
                         state.replyActivity == msg.id || msg.replyStatus == "running" -> {
-                            ReplyHeading()
-                            Text("阿布正在生成回复…", Modifier.padding(start = 34.dp), color = colors.onSurfaceVariant)
+                            ReplyHeading(bot)
+                            Text("${bot.name}正在生成回复…", Modifier.padding(start = 34.dp), color = colors.onSurfaceVariant)
                         }
                         state.modelConfigured && index == state.messages.lastIndex -> {
                             if (msg.replyStatus.isNotEmpty()) {
@@ -189,7 +201,7 @@ fun ChatDetailScreen(client: ChatClient, token: String, state: ChatState, navSta
                     Text(when {
                         token.isBlank() -> "请先在设置中应用开发令牌，再开始对话。"
                         state.busy -> "正在读取对话…"
-                        state.historyLoaded -> "还没有对话，和阿布说点什么吧。"
+                        state.historyLoaded -> "还没有对话，和${bot.name}说点什么吧。"
                         else -> "连接后台后才能读取对话。"
                     }, color = colors.onSurfaceVariant)
                 }
@@ -224,7 +236,7 @@ fun ChatDetailScreen(client: ChatClient, token: String, state: ChatState, navSta
                 keyboardActions = KeyboardActions(onDone = { keyboard?.hide() }),
                 decorationBox = { field ->
                     Box {
-                        if (state.draft.isEmpty()) Text("和阿布说点什么…", color = colors.onSurfaceVariant)
+                        if (state.draft.isEmpty()) Text("和${bot.name}说点什么…", color = colors.onSurfaceVariant, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                         field()
                     }
                 }
@@ -244,9 +256,9 @@ fun ChatDetailScreen(client: ChatClient, token: String, state: ChatState, navSta
 }
 
 @Composable
-private fun ReplyHeading() {
+private fun ReplyHeading(bot: Bot) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-        BotAvatar(size = 29.dp)
-        Text("阿布", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        BotAvatar(size = 29.dp, avatar = bot.avatar)
+        Text(bot.name, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

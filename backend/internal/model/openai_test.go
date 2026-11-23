@@ -3,9 +3,11 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -113,6 +115,76 @@ func TestCancellation(t *testing.T) {
 	_, err = client.Complete(ctx, []Message{{Role: "user", Content: "hello"}})
 	if err == nil || time.Since(start) > time.Second {
 		t.Fatalf("cancel failed: %v", err)
+	}
+}
+
+func TestCompleteDeadlineUsesCallerOrFiniteDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		budget, release    time.Duration
+		cancel, noDeadline bool
+		want               error
+	}{
+		{name: "explicit-long-budget", budget: 2 * time.Second, release: 160 * time.Millisecond},
+		{name: "short-caller-deadline", budget: 35 * time.Millisecond, want: context.DeadlineExceeded},
+		{name: "no-deadline-fallback", noDeadline: true, want: context.DeadlineExceeded},
+		{name: "explicit-cancel", budget: 2 * time.Second, cancel: true, want: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits atomic.Int32
+			started := make(chan struct{}, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				// Flush the header and withhold the response body to test the full-call deadline.
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				select {
+				case started <- struct{}{}:
+				default:
+				}
+				if tc.release == 0 {
+					select {
+					case <-r.Context().Done():
+					case <-time.After(3 * time.Second):
+					}
+					return
+				}
+				select {
+				case <-r.Context().Done():
+				case <-time.After(tc.release):
+					_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"complete"},"finish_reason":"stop"}]}`))
+				}
+			}))
+			defer server.Close()
+			client, err := NewOpenAI(Config{BaseURL: server.URL, Model: "fixture", APIKey: "fixture"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.client.Timeout = 100 * time.Millisecond // Scaled equivalent of the old fixed 45s HTTP limit.
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if !tc.noDeadline {
+				var stop context.CancelFunc
+				ctx, stop = context.WithTimeout(ctx, tc.budget)
+				defer stop()
+			}
+			if tc.cancel {
+				go func() {
+					select {
+					case <-started:
+						cancel()
+					case <-ctx.Done():
+					}
+				}()
+			}
+			got, err := client.Complete(ctx, []Message{{Role: "user", Content: "fixture"}})
+			if !errors.Is(err, tc.want) || tc.want == nil && got != "complete" {
+				t.Fatalf("result=%q error=%v; expected %v", got, err, tc.want)
+			}
+			if hits.Load() != 1 {
+				t.Fatalf("model HTTP requests=%d, want 1", hits.Load())
+			}
+		})
 	}
 }
 

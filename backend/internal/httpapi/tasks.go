@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,12 +27,18 @@ var taskIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 type task struct {
 	ID        string    `json:"id"`
+	BotID     string    `json:"botId"`
 	Content   string    `json:"content"`
 	Status    string    `json:"status"`
 	Result    string    `json:"result,omitempty"`
 	Error     string    `json:"error,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type storedTask struct {
+	task
+	Instructions string `json:"instructionsSnapshot"`
 }
 
 type taskAvailability struct {
@@ -50,9 +55,11 @@ type taskResponse struct {
 type TaskAPI struct {
 	mu            sync.Mutex
 	path          string
-	tasks         []task
+	tasks         []storedTask
+	bots          *Bots
 	provider      model.Completer
 	timeout       time.Duration
+	draftTimeout  time.Duration
 	handler       http.Handler
 	wake          chan struct{}
 	done          chan struct{}
@@ -61,16 +68,29 @@ type TaskAPI struct {
 	activeCancel  context.CancelFunc
 	activeIndex   int
 	storageFailed bool
+	generated     *Generated
 }
 
 func NewTaskAPI(path, token string, provider model.Completer, timeout time.Duration) (*TaskAPI, error) {
+	return NewTaskAPIWithBots(path, token, provider, timeout, nil)
+}
+
+func NewTaskAPIWithBots(path, token string, provider model.Completer, timeout time.Duration, bots *Bots) (*TaskAPI, error) {
+	return newTaskAPI(path, token, provider, timeout, timeout, bots, nil)
+}
+
+func NewTaskAPIWithGenerated(path, token string, provider model.Completer, timeout, draftTimeout time.Duration, bots *Bots, generated *Generated) (*TaskAPI, error) {
+	return newTaskAPI(path, token, provider, timeout, draftTimeout, bots, generated)
+}
+
+func newTaskAPI(path, token string, provider model.Completer, timeout, draftTimeout time.Duration, bots *Bots, generated *Generated) (*TaskAPI, error) {
 	if len(token) < 32 {
 		return nil, errors.New("ABU_DEV_TOKEN must contain at least 32 bytes")
 	}
-	if timeout <= 0 {
+	if timeout <= 0 || draftTimeout <= 0 {
 		return nil, errors.New("task timeout must be positive")
 	}
-	tasks, err := loadTaskSnapshot(path)
+	tasks, err := loadTaskSnapshot(path, bots)
 	if err != nil {
 		return nil, err
 	}
@@ -87,9 +107,9 @@ func NewTaskAPI(path, token string, provider model.Completer, timeout time.Durat
 
 	ctx, stop := context.WithCancel(context.Background())
 	api := &TaskAPI{
-		path: path, tasks: tasks, provider: provider, timeout: timeout,
+		path: path, tasks: tasks, bots: bots, provider: provider, timeout: timeout, draftTimeout: draftTimeout,
 		wake: make(chan struct{}, 1), done: make(chan struct{}),
-		workerCtx: ctx, stop: stop,
+		workerCtx: ctx, stop: stop, generated: generated,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/tasks", api.list)
@@ -98,6 +118,9 @@ func NewTaskAPI(path, token string, provider model.Completer, timeout time.Durat
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", api.record)
 	api.handler = requireDevToken(token, mux)
 
+	if generated != nil {
+		generated.worker = api
+	}
 	if provider != nil {
 		go api.run()
 		api.notify()
@@ -132,28 +155,52 @@ func (s *TaskAPI) Shutdown(ctx context.Context) error {
 	}
 }
 
-func (s *TaskAPI) list(w http.ResponseWriter, _ *http.Request) {
+func (s *TaskAPI) list(w http.ResponseWriter, r *http.Request) {
+	id, all, ok := queryBotID(r, true)
+	if !ok {
+		apiError(w, 400, "invalid_bot_id")
+		return
+	}
+	if !all {
+		if _, ok := s.bots.resolve(w, id); !ok {
+			return
+		}
+	}
 	s.mu.Lock()
+	tasks := []task{}
+	for _, row := range s.tasks {
+		if all || row.BotID == id {
+			tasks = append(tasks, row.task)
+		}
+	}
 	response := struct {
 		taskAvailability
 		Tasks []task `json:"tasks"`
-	}{s.availability(), slices.Clone(s.tasks)}
+	}{s.availability(), tasks}
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *TaskAPI) create(w http.ResponseWriter, r *http.Request) {
+	if rejectBotQuery(w, r) {
+		return
+	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, taskBodyLimit))
 	if err != nil {
 		badTaskBody(w, err)
 		return
 	}
-	id, content, ok := decodeTaskInput(raw)
-	if !ok || !taskIDPattern.MatchString(id) || !validTaskText(content) {
+	fields, ok := scopedBody(raw, []string{"id", "content"}, nil)
+	var input task
+	if !ok || json.Unmarshal(raw, &input) != nil || !taskIDPattern.MatchString(input.ID) || !validTaskText(input.Content) {
 		taskError(w, http.StatusBadRequest, "invalid_task")
 		return
 	}
-	response, status, code := s.submit(id, content)
+	bot, ok := s.bots.resolve(w, bodyBotID(fields))
+	if !ok {
+		return
+	}
+	response, status, code := s.submit(bot, input.ID, input.Content)
 	if code != "" {
 		taskError(w, status, code)
 		return
@@ -161,14 +208,14 @@ func (s *TaskAPI) create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, response)
 }
 
-func (s *TaskAPI) submit(id, content string) (taskResponse, int, string) {
+func (s *TaskAPI) submit(bot Bot, id, content string) (taskResponse, int, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if i := s.find(id); i >= 0 {
+	if i := s.find(bot.ID, id); i >= 0 {
 		if s.tasks[i].Content != content {
 			return taskResponse{}, http.StatusConflict, "id_conflict"
 		}
-		return taskResponse{s.availability(), s.tasks[i]}, http.StatusOK, ""
+		return taskResponse{s.availability(), s.tasks[i].task}, http.StatusOK, ""
 	}
 	switch {
 	case s.storageFailed:
@@ -181,8 +228,8 @@ func (s *TaskAPI) submit(id, content string) (taskResponse, int, string) {
 		return taskResponse{}, http.StatusConflict, "task_limit"
 	}
 	now := time.Now().UTC()
-	entry := task{ID: id, Content: content, Status: "queued", CreatedAt: now, UpdatedAt: now}
-	if !s.persist(append(slices.Clone(s.tasks), entry)) {
+	entry := task{ID: id, BotID: bot.ID, Content: content, Status: "queued", CreatedAt: now, UpdatedAt: now}
+	if !s.persist(append(slices.Clone(s.tasks), storedTask{entry, bot.Instructions})) {
 		return taskResponse{}, http.StatusServiceUnavailable, "storage_unavailable"
 	}
 	s.notify()
@@ -190,6 +237,14 @@ func (s *TaskAPI) submit(id, content string) (taskResponse, int, string) {
 }
 
 func (s *TaskAPI) record(w http.ResponseWriter, r *http.Request) {
+	botID, _, ok := queryBotID(r, false)
+	if !ok {
+		apiError(w, 400, "invalid_bot_id")
+		return
+	}
+	if _, ok := s.bots.resolve(w, botID); !ok {
+		return
+	}
 	id := r.PathValue("id")
 	cancel := r.Method == http.MethodPost
 	if cancel {
@@ -203,7 +258,7 @@ func (s *TaskAPI) record(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	response, status, code := s.readOrCancel(id, cancel)
+	response, status, code := s.readOrCancel(botID, id, cancel)
 	if code != "" {
 		taskError(w, status, code)
 		return
@@ -211,10 +266,10 @@ func (s *TaskAPI) record(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, response)
 }
 
-func (s *TaskAPI) readOrCancel(id string, cancel bool) (taskResponse, int, string) {
+func (s *TaskAPI) readOrCancel(botID, id string, cancel bool) (taskResponse, int, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	i := s.find(id)
+	i := s.find(botID, id)
 	if i < 0 {
 		return taskResponse{}, http.StatusNotFound, "task_not_found"
 	}
@@ -227,48 +282,19 @@ func (s *TaskAPI) readOrCancel(id string, cancel bool) (taskResponse, int, strin
 			s.activeCancel()
 		}
 	}
-	return taskResponse{s.availability(), s.tasks[i]}, http.StatusOK, ""
+	return taskResponse{s.availability(), s.tasks[i].task}, http.StatusOK, ""
 }
 
 func (s *TaskAPI) availability() taskAvailability {
 	return taskAvailability{s.provider != nil, !s.storageFailed}
 }
 
-func (s *TaskAPI) find(id string) int {
-	return slices.IndexFunc(s.tasks, func(t task) bool { return t.ID == id })
+func (s *TaskAPI) find(botID, id string) int {
+	return slices.IndexFunc(s.tasks, func(t storedTask) bool { return t.BotID == botID && t.ID == id })
 }
 
 func validTaskText(text string) bool {
 	return utf8.ValidString(text) && strings.TrimSpace(text) != "" && utf8.RuneCountInString(text) <= taskTextLimit
-}
-
-// Read exactly one object with the two exact keys. encoding/json's struct
-// decoder would otherwise accept duplicate and case-insensitive field names.
-func decodeTaskInput(raw []byte) (id, content string, ok bool) {
-	if !utf8.Valid(raw) || !validUTF16Escapes(raw) {
-		return "", "", false
-	}
-	d := json.NewDecoder(bytes.NewReader(raw))
-	if token, err := d.Token(); err != nil || token != json.Delim('{') {
-		return "", "", false
-	}
-	values := map[string]string{}
-	for d.More() {
-		key, err := d.Token()
-		if err != nil || (key != "id" && key != "content") {
-			return "", "", false
-		}
-		name := key.(string)
-		var value *string
-		if _, seen := values[name]; seen || d.Decode(&value) != nil || value == nil {
-			return "", "", false
-		}
-		values[name] = *value
-	}
-	if token, err := d.Token(); err != nil || token != json.Delim('}') || d.Decode(new(any)) != io.EOF {
-		return "", "", false
-	}
-	return values["id"], values["content"], len(values) == 2
 }
 
 // Reject unpaired surrogates before encoding/json can turn them into U+FFFD,
@@ -331,7 +357,12 @@ func (s *TaskAPI) run() {
 		case <-s.workerCtx.Done():
 			return
 		case <-s.wake:
-			for s.runNext() {
+			for {
+				text := s.runNext()
+				generated := s.generated.runNext(s.workerCtx, s.provider, s.timeout, s.draftTimeout)
+				if !text && !generated {
+					break
+				}
 			}
 		}
 	}
@@ -343,12 +374,12 @@ func (s *TaskAPI) runNext() bool {
 		s.mu.Unlock()
 		return false
 	}
-	i := slices.IndexFunc(s.tasks, func(t task) bool { return t.Status == "queued" })
+	i := slices.IndexFunc(s.tasks, func(t storedTask) bool { return t.Status == "queued" })
 	if i < 0 || !s.change(i, "running", "", "") {
 		s.mu.Unlock()
 		return false
 	}
-	content := s.tasks[i].Content
+	row := s.tasks[i]
 	ctx, cancel := context.WithTimeout(s.workerCtx, s.timeout)
 	s.activeIndex, s.activeCancel = i, cancel
 	s.mu.Unlock()
@@ -356,7 +387,7 @@ func (s *TaskAPI) runNext() bool {
 	var output string
 	err := ctx.Err()
 	if err == nil {
-		output, err = s.provider.Complete(ctx, []model.Message{{Role: "user", Content: content}})
+		output, err = s.provider.Complete(ctx, append(rolePrompt(row.Instructions), model.Message{Role: "user", Content: row.Content}))
 	}
 	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded)
 

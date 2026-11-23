@@ -54,13 +54,19 @@ func newDevHandler(token, dir string, provider model.Completer) (http.Handler, *
 	mux := http.NewServeMux()
 	mux.Handle("/", httpapi.NewHandler())
 	if token == "" {
-		log.Print("chat, tasks and apps disabled: ABU_DEV_TOKEN is not configured")
+		log.Print("chat, tasks, apps and bots disabled: ABU_DEV_TOKEN is not configured")
 		return mux, nil, nil
 	}
 	if dir == "" {
 		dir = "data"
 	}
-	chat, err := httpapi.NewChatHandlerWithModel(filepath.Join(dir, "messages.json"), token, provider)
+	bots, err := httpapi.NewBots(filepath.Join(dir, "bots.json"), token)
+	if err != nil {
+		return nil, nil, err
+	}
+	mux.Handle("/api/bots", bots)
+	mux.Handle("/api/bots/", bots)
+	chat, err := httpapi.NewChatHandlerWithBots(filepath.Join(dir, "messages.json"), token, provider, bots)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -69,7 +75,8 @@ func newDevHandler(token, dir string, provider model.Completer) (http.Handler, *
 	if err != nil {
 		return nil, nil, err
 	}
-	tasks, err := httpapi.NewTaskAPI(filepath.Join(dir, "tasks.json"), token, provider, 45*time.Second)
+	generated := httpapi.NewGenerated(filepath.Join(dir, "generated.json"), token, bots)
+	tasks, err := httpapi.NewTaskAPIWithGenerated(filepath.Join(dir, "tasks.json"), token, provider, model.DefaultCompletionTimeout, 90*time.Second, bots, generated)
 	var taskHandler http.Handler = tasks
 	if err != nil {
 		log.Print("tasks disabled: task storage could not be initialized; restore the snapshot and restart")
@@ -79,6 +86,12 @@ func newDevHandler(token, dir string, provider model.Completer) (http.Handler, *
 	mux.Handle("/api/tasks/", taskHandler)
 	// Keep the original path for the app asset allowlist; ServeMux can redirect dot segments.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, prefix := range []string{"/api/app-drafts", "/api/generated-apps"} {
+			if r.URL.Path == prefix || strings.HasPrefix(r.URL.Path, prefix+"/") {
+				generated.ServeHTTP(w, r)
+				return
+			}
+		}
 		if r.URL.Path == "/api/apps" || strings.HasPrefix(r.URL.Path, "/api/apps/") {
 			apps.ServeHTTP(w, r)
 			return
