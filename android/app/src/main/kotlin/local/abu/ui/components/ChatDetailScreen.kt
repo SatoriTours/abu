@@ -18,12 +18,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -42,8 +44,10 @@ import local.abu.data.ChatClient
 import local.abu.data.ChatException
 import local.abu.data.ChatMessage
 import local.abu.ui.ChatState
-import local.abu.ui.model.formatChatTime
+import local.abu.ui.model.formatChatDayHeader
+import local.abu.ui.model.formatShortClock
 import local.abu.ui.model.sendableChatText
+import local.abu.ui.model.shouldShowTimeHeader
 import local.abu.ui.navigation.AppNavigationState
 import java.util.UUID
 
@@ -58,6 +62,7 @@ internal fun ChatDetailScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     var refresh by remember { mutableIntStateOf(0) }
     var menuOpen by remember { mutableStateOf(false) }
+    var messageMenuId by remember { mutableStateOf<String?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<ChatMessage?>(null) }
     var copiedKey by remember { mutableStateOf<String?>(null) }
@@ -286,20 +291,44 @@ internal fun ChatDetailScreen(
                 Icon(painterResource(R.drawable.ic_arrow_back), "返回对话列表")
             }
             BotAvatar(
-                size = 44.dp, avatar = bot.avatar, animate = true,
+                size = 40.dp, avatar = bot.avatar, animate = true,
                 working = isStreaming || state.messages.lastOrNull()?.replyStatus == "running",
                 completed = state.justCompletedReply,
             )
-            Column(Modifier.weight(1f).padding(start = 5.dp)) {
-                Text(bot.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            IconButton(onClick = { keyboard?.hide(); onApps() }, enabled = token.isNotBlank()) {
-                Icon(painterResource(R.drawable.ic_tab_apps), "此角色的小程序操作")
+            Column(Modifier.weight(1f).padding(start = 8.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                Text(
+                    bot.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Box(
+                        Modifier
+                            .size(5.dp)
+                            .clip(CircleShape)
+                            .background(colors.primary),
+                    )
+                    Text(
+                        subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
             Box {
                 IconButton(onClick = { menuOpen = true }, enabled = token.isNotBlank()) {
-                    Icon(painterResource(R.drawable.ic_more), "更多对话操作")
+                    Icon(
+                        painterResource(R.drawable.ic_more),
+                        "更多对话操作",
+                        tint = colors.onSurfaceVariant,
+                    )
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     DropdownMenuItem(
@@ -308,6 +337,15 @@ internal fun ChatDetailScreen(
                         onClick = {
                             menuOpen = false
                             refresh++
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("小程序") },
+                        enabled = token.isNotBlank(),
+                        onClick = {
+                            menuOpen = false
+                            keyboard?.hide()
+                            onApps()
                         },
                     )
                     DropdownMenuItem(
@@ -321,7 +359,7 @@ internal fun ChatDetailScreen(
                 }
             }
         }
-        HorizontalDivider(color = colors.outlineVariant)
+        HorizontalDivider(thickness = 0.5.dp, color = colors.outlineVariant.copy(alpha = 0.55f))
 
         LazyColumn(
             state = listState, modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -329,48 +367,84 @@ internal fun ChatDetailScreen(
             verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
             itemsIndexed(state.messages, key = { _, msg -> msg.id }) { index, msg ->
-                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    val time = formatChatTime(msg.createdAt)
-                    SelectionContainer(Modifier.align(Alignment.End)) {
+                val prevCreatedAt = state.messages.getOrNull(index - 1)?.createdAt
+                val showDayHeader = shouldShowTimeHeader(prevCreatedAt, msg.createdAt)
+                val dayHeader = if (showDayHeader) formatChatDayHeader(msg.createdAt) else ""
+                val clock = formatShortClock(msg.createdAt)
+                val userCopyKey = "user:${msg.id}"
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (dayHeader.isNotEmpty()) {
                         Text(
-                            msg.content,
-                            Modifier.fillMaxWidth(0.86f)
-                                .background(colors.primaryContainer, RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp))
-                                .padding(horizontal = 14.dp, vertical = 10.dp),
-                            color = colors.onPrimaryContainer, style = MaterialTheme.typography.bodyLarge,
+                            dayHeader,
+                            Modifier.align(Alignment.CenterHorizontally).padding(vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.onSurfaceVariant.copy(alpha = 0.72f),
                         )
+                    }
+                    BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                        val bubbleMaxWidth = maxWidth * 0.82f
+                        SelectionContainer {
+                            Text(
+                                msg.content,
+                                Modifier
+                                    .widthIn(max = bubbleMaxWidth)
+                                    .background(colors.primaryContainer, RoundedCornerShape(18.dp, 18.dp, 5.dp, 18.dp))
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                color = colors.onPrimaryContainer,
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        }
                     }
                     Row(
                         Modifier.align(Alignment.End),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        if (time.isNotEmpty()) {
-                            Text(time, color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
-                        }
-                        val userCopyKey = "user:${msg.id}"
-                        IconButton(
-                            onClick = { copyText(msg.content, userCopyKey) },
-                            modifier = Modifier.size(32.dp),
-                        ) {
-                            Icon(
-                                painterResource(R.drawable.ic_copy),
-                                contentDescription = if (copiedKey == userCopyKey) "已复制消息" else "复制消息",
-                                modifier = Modifier.size(15.dp),
-                                tint = if (copiedKey == userCopyKey) colors.primary else colors.onSurfaceVariant,
+                        val meta = if (clock.isNotEmpty()) "$clock · 已发送" else "已发送"
+                        Text(
+                            meta,
+                            color = colors.onSurfaceVariant.copy(alpha = 0.72f),
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                        if (copiedKey == userCopyKey) {
+                            Text(
+                                "· 已复制",
+                                color = colors.primary,
+                                style = MaterialTheme.typography.labelSmall,
                             )
                         }
-                        if (canMutateHistory) {
+                        Box {
                             IconButton(
-                                onClick = { pendingDelete = msg },
-                                modifier = Modifier.size(32.dp),
+                                onClick = { messageMenuId = msg.id },
+                                modifier = Modifier.size(26.dp),
                             ) {
                                 Icon(
-                                    painterResource(R.drawable.ic_delete),
-                                    contentDescription = "删除消息",
-                                    modifier = Modifier.size(15.dp),
-                                    tint = colors.onSurfaceVariant,
+                                    painterResource(R.drawable.ic_more),
+                                    contentDescription = "消息操作",
+                                    modifier = Modifier.size(14.dp),
+                                    tint = colors.onSurfaceVariant.copy(alpha = 0.62f),
                                 )
+                            }
+                            DropdownMenu(
+                                expanded = messageMenuId == msg.id,
+                                onDismissRequest = { messageMenuId = null },
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("复制消息") },
+                                    onClick = {
+                                        messageMenuId = null
+                                        copyText(msg.content, userCopyKey)
+                                    },
+                                )
+                                if (canMutateHistory) {
+                                    DropdownMenuItem(
+                                        text = { Text("删除消息", color = colors.error) },
+                                        onClick = {
+                                            messageMenuId = null
+                                            pendingDelete = msg
+                                        },
+                                    )
+                                }
                             }
                         }
                     }
@@ -382,20 +456,24 @@ internal fun ChatDetailScreen(
                                 MarkdownContent(
                                     text = state.streamingText,
                                     onCopyCode = { copyText(it) },
-                                    modifier = Modifier.padding(start = 34.dp),
+                                    modifier = Modifier.fillMaxWidth(),
                                 )
                             } else {
                                 Text(
                                     "${bot.name}正在思考…",
-                                    Modifier.padding(start = 34.dp),
                                     color = colors.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodyMedium,
                                 )
                             }
                         }
 
                         msg.replyStatus == "running" -> {
                             ReplyHeading(bot, badge = "生成中…")
-                            Text("${bot.name}正在生成回复…", Modifier.padding(start = 34.dp), color = colors.onSurfaceVariant)
+                            Text(
+                                "${bot.name}正在生成回复…",
+                                color = colors.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
                         }
 
                         msg.replyStatus == "completed" -> {
@@ -403,26 +481,29 @@ internal fun ChatDetailScreen(
                             MarkdownContent(
                                 text = msg.reply,
                                 onCopyCode = { copyText(it) },
-                                modifier = Modifier.padding(start = 34.dp),
+                                modifier = Modifier.fillMaxWidth(),
                             )
                             val replyCopyKey = "reply:${msg.id}"
                             Row(
-                                Modifier.padding(start = 26.dp),
                                 verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp),
                             ) {
-                                TextButton(
+                                IconButton(
                                     onClick = { copyText(msg.reply, replyCopyKey) },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.size(30.dp),
                                 ) {
                                     Icon(
                                         painterResource(R.drawable.ic_copy),
-                                        contentDescription = null,
-                                        modifier = Modifier.size(14.dp),
+                                        contentDescription = if (copiedKey == replyCopyKey) "已复制回复" else "复制回复",
+                                        modifier = Modifier.size(15.dp),
+                                        tint = if (copiedKey == replyCopyKey) colors.primary else colors.onSurfaceVariant.copy(alpha = 0.68f),
                                     )
-                                    Spacer(Modifier.width(4.dp))
+                                }
+                                if (copiedKey == replyCopyKey) {
                                     Text(
-                                        if (copiedKey == replyCopyKey) "已复制" else "复制回复",
-                                        style = MaterialTheme.typography.labelMedium,
+                                        "已复制",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = colors.primary,
                                     )
                                 }
                             }
@@ -433,43 +514,51 @@ internal fun ChatDetailScreen(
                             MarkdownContent(
                                 text = msg.reply,
                                 onCopyCode = { copyText(it) },
-                                modifier = Modifier.padding(start = 34.dp),
+                                modifier = Modifier.fillMaxWidth(),
                             )
                             val replyCopyKey = "reply:${msg.id}"
                             Row(
-                                Modifier.padding(start = 26.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(2.dp),
                             ) {
-                                TextButton(
+                                IconButton(
                                     onClick = { copyText(msg.reply, replyCopyKey) },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.size(30.dp),
                                 ) {
                                     Icon(
                                         painterResource(R.drawable.ic_copy),
-                                        contentDescription = null,
-                                        modifier = Modifier.size(14.dp),
+                                        contentDescription = if (copiedKey == replyCopyKey) "已复制回复" else "复制回复",
+                                        modifier = Modifier.size(15.dp),
+                                        tint = if (copiedKey == replyCopyKey) colors.primary else colors.onSurfaceVariant.copy(alpha = 0.68f),
                                     )
-                                    Spacer(Modifier.width(4.dp))
+                                }
+                                if (copiedKey == replyCopyKey) {
                                     Text(
-                                        if (copiedKey == replyCopyKey) "已复制" else "复制回复",
-                                        style = MaterialTheme.typography.labelMedium,
+                                        "已复制",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = colors.primary,
                                     )
                                 }
                                 if (state.modelConfigured && index == state.messages.lastIndex) {
-                                    TextButton(
+                                    IconButton(
                                         enabled = !state.busy,
                                         onClick = { retryReply(msg) },
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                    ) { Text("重试回复", style = MaterialTheme.typography.labelMedium) }
+                                        modifier = Modifier.size(30.dp),
+                                    ) {
+                                        Icon(
+                                            painterResource(R.drawable.ic_refresh),
+                                            contentDescription = "重试回复",
+                                            modifier = Modifier.size(15.dp),
+                                            tint = colors.onSurfaceVariant.copy(alpha = 0.68f),
+                                        )
+                                    }
                                 }
                             }
                             if (state.modelConfigured && index == state.messages.lastIndex) {
                                 Text(
                                     "已停止生成；重试将重新生成并可能再次计费。",
-                                    Modifier.padding(start = 34.dp),
-                                    color = colors.onSurfaceVariant,
-                                    style = MaterialTheme.typography.labelMedium,
+                                    color = colors.onSurfaceVariant.copy(alpha = 0.78f),
+                                    style = MaterialTheme.typography.labelSmall,
                                 )
                             }
                         }
@@ -485,6 +574,7 @@ internal fun ChatDetailScreen(
                             TextButton(
                                 enabled = !state.busy,
                                 onClick = { retryReply(msg) },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                             ) { Text(if (msg.replyStatus.isEmpty()) "生成回复" else "重试回复") }
                         }
                     }
@@ -524,17 +614,29 @@ internal fun ChatDetailScreen(
         }
 
         val canSend = token.isNotBlank() && sendableChatText(state.draft, state.busy) != null
-        val composerShape = RoundedCornerShape(24.dp)
+        val composerShape = RoundedCornerShape(26.dp)
         Row(
             Modifier
                 .padding(horizontal = 14.dp, vertical = 8.dp)
                 .fillMaxWidth()
                 .heightIn(min = 48.dp)
                 .background(colors.surfaceVariant, composerShape)
-                .border(1.dp, colors.outlineVariant, composerShape)
-                .padding(start = 15.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+                .border(0.75.dp, colors.outlineVariant.copy(alpha = 0.6f), composerShape)
+                .padding(start = 4.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
+            IconButton(
+                onClick = { keyboard?.hide(); onApps() },
+                enabled = token.isNotBlank(),
+                modifier = Modifier.size(44.dp),
+            ) {
+                Icon(
+                    painterResource(R.drawable.ic_add_bot),
+                    contentDescription = "此角色的小程序操作",
+                    modifier = Modifier.size(20.dp),
+                    tint = if (token.isNotBlank()) colors.onSurfaceVariant else colors.onSurfaceVariant.copy(alpha = 0.4f),
+                )
+            }
             BasicTextField(
                 value = state.draft,
                 onValueChange = { incoming ->
@@ -543,7 +645,7 @@ internal fun ChatDetailScreen(
                 },
                 modifier = Modifier
                     .weight(1f)
-                    .padding(vertical = 10.dp)
+                    .padding(vertical = 11.dp, horizontal = 2.dp)
                     .semantics { contentDescription = "消息正文" },
                 textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
                 cursorBrush = SolidColor(colors.primary),
@@ -557,7 +659,7 @@ internal fun ChatDetailScreen(
                         if (state.draft.isEmpty()) {
                             Text(
                                 "和${bot.name}说点什么…",
-                                color = colors.onSurfaceVariant,
+                                color = colors.onSurfaceVariant.copy(alpha = 0.78f),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
@@ -570,7 +672,7 @@ internal fun ChatDetailScreen(
                 IconButton(
                     onClick = ::stopReply,
                     enabled = !state.stopping,
-                    modifier = Modifier.size(48.dp),
+                    modifier = Modifier.size(44.dp),
                 ) {
                     Box(
                         Modifier
@@ -590,12 +692,12 @@ internal fun ChatDetailScreen(
                     }
                 }
             } else {
-                IconButton(onClick = ::send, enabled = canSend, modifier = Modifier.size(48.dp)) {
+                IconButton(onClick = ::send, enabled = canSend, modifier = Modifier.size(44.dp)) {
                     Box(
                         Modifier
                             .size(34.dp)
                             .background(
-                                if (canSend) colors.primary else colors.outlineVariant,
+                                if (canSend) colors.primary else colors.outlineVariant.copy(alpha = 0.75f),
                                 CircleShape,
                             ),
                         contentAlignment = Alignment.Center,
@@ -615,9 +717,13 @@ internal fun ChatDetailScreen(
 
 @Composable
 private fun ReplyHeading(bot: Bot, badge: String? = null) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-        BotAvatar(size = 29.dp, avatar = bot.avatar)
-        Text(bot.name, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        BotAvatar(size = 26.dp, avatar = bot.avatar)
+        Text(
+            bot.name,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         if (!badge.isNullOrBlank()) {
             Text(
                 badge,

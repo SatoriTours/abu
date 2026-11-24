@@ -1,9 +1,11 @@
 package local.abu.ui.components
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -60,15 +62,21 @@ internal fun GeneratedCenter(
                 IconButton(onClick = ::back, enabled = !state.busy) {
                     Icon(painterResource(R.drawable.ic_arrow_back), if (author != null && route == GeneratedRoute.Center) "返回对话" else "返回应用中心")
                 }
-                Text(when (route) {
-                    GeneratedRoute.Center -> "${author?.name.orEmpty()} · 小程序"
-                    is GeneratedRoute.Form -> route.form.action.title
-                    is GeneratedRoute.Job -> "生成任务"
-                    is GeneratedRoute.Versions -> "资源版本"
-                    else -> "小程序"
-                }, style = MaterialTheme.typography.titleLarge)
+                Text(
+                    when (route) {
+                        GeneratedRoute.Center -> "${author?.name.orEmpty()} · 小程序"
+                        is GeneratedRoute.Form -> route.form.action.title
+                        is GeneratedRoute.Job -> "生成任务"
+                        is GeneratedRoute.Versions -> "资源版本"
+                        else -> "小程序"
+                    },
+                    fontSize = if (route == GeneratedRoute.Center) 26.sp else 20.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
             }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
         }
 
         if (route == GeneratedRoute.Center) {
@@ -78,9 +86,12 @@ internal fun GeneratedCenter(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 item {
-                    if (author == null) Text("小程序", fontSize = 25.sp, fontWeight = FontWeight.SemiBold)
-                    Text("生成后可反复使用，打开、刷新和保存不会调用 AI。",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (author == null) Text("小程序", fontSize = 26.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "生成后可反复使用，打开、刷新和保存不会调用 AI。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 item {
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -198,9 +209,13 @@ internal fun GeneratedCenter(
 
 @Composable
 internal fun GeneratedCard(content: @Composable ColumnScope.() -> Unit) {
-    Surface(Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = MaterialTheme.shapes.large) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp), content = content)
+    Surface(
+        Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+    ) {
+        Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(6.dp), content = content)
     }
 }
 
@@ -250,13 +265,28 @@ private fun GenerationEditor(state: GeneratedUiState, form: GenerationForm, bots
         }
     }
     if (form.action == GenerationAction.NEW) {
-        OutlinedTextField(form.name, { if (it.length <= 320) state.setForm(form.copy(name = it)) },
-            Modifier.fillMaxWidth(), label = { Text("小程序名称") }, singleLine = true, enabled = enabled,
-            supportingText = { Text("${form.name.codePointCount(0,form.name.length)} / 80 字符") })
+        OutlinedTextField(
+            form.name,
+            { if (it.length <= 320) state.setForm(form.copy(name = it)) },
+            Modifier.fillMaxWidth(),
+            label = { Text("小程序名称") },
+            singleLine = true,
+            shape = RoundedCornerShape(14.dp),
+            enabled = enabled,
+            supportingText = { Text("${form.name.codePointCount(0, form.name.length)} / 80 字符") },
+        )
     }
-    OutlinedTextField(form.request, { if (it.length <= 16000) state.setForm(form.copy(request = it)) },
-        Modifier.fillMaxWidth(), label = { Text("需求说明") }, minLines = 4, maxLines = 12, enabled = enabled,
-        supportingText = { Text("${form.request.codePointCount(0,form.request.length)} / 4000 字符") })
+    OutlinedTextField(
+        form.request,
+        { if (it.length <= 16000) state.setForm(form.copy(request = it)) },
+        Modifier.fillMaxWidth(),
+        label = { Text("需求说明") },
+        minLines = 4,
+        maxLines = 12,
+        shape = RoundedCornerShape(14.dp),
+        enabled = enabled,
+        supportingText = { Text("${form.request.codePointCount(0, form.request.length)} / 4000 字符") },
+    )
     Text(if (form.action == GenerationAction.SUGGEST)
         "只生成数据建议，不会写入。请核对改动后再确认。"
         else "只有点击开始生成才调用 AI。生成完成后需预览并确认安装，不会自动发布。")

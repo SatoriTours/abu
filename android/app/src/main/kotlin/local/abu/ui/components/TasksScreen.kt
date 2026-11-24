@@ -55,16 +55,21 @@ internal fun TasksScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("任务", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                    OutlinedButton(onClick = onRefresh, enabled = state.hasToken && !state.busy) {
+                    Text("任务", fontSize = 26.sp, fontWeight = FontWeight.SemiBold)
+                    TextButton(onClick = onRefresh, enabled = state.hasToken && !state.busy) {
                         Text("刷新")
                     }
                 }
             }
             item {
                 Box {
-                    OutlinedButton(onClick = { filterOpen = true }, enabled = state.hasToken && !state.busy,
-                        modifier = Modifier.heightIn(min = 48.dp)) {
+                    OutlinedButton(
+                        onClick = { filterOpen = true },
+                        enabled = state.hasToken && !state.busy,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(0.75.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)),
+                        modifier = Modifier.heightIn(min = 42.dp),
+                    ) {
                         Text(if (selected == null) "范围：全部角色" else "范围：${botName(selected)}")
                     }
                     DropdownMenu(expanded = filterOpen, onDismissRequest = { filterOpen = false }) {
@@ -79,14 +84,18 @@ internal fun TasksScreen(
                     }
                 }
                 if (selected == null && pending == null) {
-                    Text("所选范围为全部角色。新建前请选择负责的角色。",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "所选范围为全部角色。新建前请选择负责的角色。",
+                        Modifier.padding(top = 6.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
             item {
                 Text(
                     "每条任务只执行一次文本请求。关闭应用后任务仍可继续，但 Go 后台须保持运行。取消不保证远端停止计算或计费。",
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
@@ -128,6 +137,7 @@ internal fun TasksScreen(
                         enabled = state.hasToken && (selected != null || pending != null),
                         minLines = 3,
                         maxLines = 6,
+                        shape = RoundedCornerShape(14.dp),
                         isError = pending == null && state.draftLength > TaskTextLimit,
                         modifier = Modifier.fillMaxWidth(),
                         supportingText = {
@@ -272,25 +282,31 @@ private fun TaskCard(
 private fun TaskSurface(content: @Composable ColumnScope.() -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
-            content = content
+            content = content,
         )
     }
 }
 
 @Composable
 private fun TaskNotice(text: String, isError: Boolean = false) {
-    TaskSurface {
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = if (isError) colors.errorContainer.copy(alpha = 0.45f) else colors.surfaceVariant.copy(alpha = 0.5f),
+    ) {
         Text(
             text,
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = if (isError) colors.error else colors.onSurfaceVariant,
         )
     }
 }

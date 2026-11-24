@@ -46,21 +46,25 @@ internal fun SettingsScreen(
         ) {
             Text(
                 text = "设置",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
+                fontSize = 26.sp,
+                fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface
             )
 
             Surface(
-                shape = RoundedCornerShape(18.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+                border = androidx.compose.foundation.BorderStroke(
+                    0.5.dp,
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
+                ),
             ) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
-                    Text("外观", style = MaterialTheme.typography.titleMedium)
+                    Text("外观", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     Column(Modifier.selectableGroup()) {
                         ThemeMode.entries.forEach { option ->
                             Row(
-                                Modifier.fillMaxWidth().heightIn(min = 48.dp).selectable(
+                                Modifier.fillMaxWidth().heightIn(min = 46.dp).selectable(
                                     selected = theme.mode == option,
                                     role = Role.RadioButton,
                                     onClick = { theme.choose(option) },
@@ -68,8 +72,8 @@ internal fun SettingsScreen(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 RadioButton(selected = theme.mode == option, onClick = null)
-                                Spacer(Modifier.width(12.dp))
-                                Text(option.label)
+                                Spacer(Modifier.width(10.dp))
+                                Text(option.label, style = MaterialTheme.typography.bodyMedium)
                             }
                         }
                     }
@@ -78,30 +82,33 @@ internal fun SettingsScreen(
 
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+                border = androidx.compose.foundation.BorderStroke(
+                    0.5.dp,
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
+                ),
             ) {
                 Column(
-                    modifier = Modifier.padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text(
                         text = "开发连接检查",
-                        fontSize = 18.sp,
+                        style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
                         text = "此检查只证明 Go 服务存活，不代表模型或数据库已就绪。",
-                        fontSize = 13.sp,
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
                     if (BuildConfig.DEBUG) {
                         Text(
                             text = "地址：127.0.0.1:8080",
-                            fontSize = 14.sp,
+                            style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Medium,
                             color = MaterialTheme.colorScheme.onSurface
                         )
@@ -112,6 +119,7 @@ internal fun SettingsScreen(
                             label = { Text("开发令牌") },
                             visualTransformation = PasswordVisualTransformation(),
                             singleLine = true,
+                            shape = RoundedCornerShape(14.dp),
                             modifier = Modifier.fillMaxWidth()
                         )
 
