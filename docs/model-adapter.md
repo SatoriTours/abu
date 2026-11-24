@@ -20,16 +20,16 @@ go run ./cmd/abu -model-env "$HOME/.config/abu/model.env"
 请不要把模型 API Key 填入安卓的“开发令牌”。
 
 ## 接口与回复
-Go backend/internal/model/ 包提供 Completer 接口与非流式 Chat Completions 实现。
+Go backend/internal/model/ 包提供 `Completer` 与 `StreamCompleter` 接口以及 OpenAI Chat Completions 同步/SSE 流式实现。
 Go 回复 API 与安卓发送流程已接通：
-1. 保存用户消息。
-2. POST /api/chat/replies（messageId，retry 可选）。
-3. 先保存 running，再调用模型；成功保存 completed/reply；失败保存 failed。
-4. 已完成请求重取缓存，不再调用模型；失败或重启遗留 interrupted 必须明确 retry=true。
-5. 同时只生成一个回复；只有最新用户消息允许新增回复，旧的已完成回复仍可取回。
+1. 保存用户消息（支持按 `botId` 与 `sessionId` 隔离）。
+2. `POST /api/chat/replies`（同步）或 `POST /api/chat/replies/stream`（SSE 流式推送 `delta`/`done`/`error`），支持 `messageId`、`retry`、`regenerate`、`runId`、`botId`、`sessionId`。
+3. 先保存 `running`，再调用模型；成功保存 `completed`/`reply`；失败保存 `failed`；通过 `POST /api/chat/replies/cancel` 显式中止则保留已输出部分并记为 `interrupted`。
+4. 已完成请求默认重取缓存，不再调用模型；传 `regenerate: true` 允许对当前会话最新一条消息重新生成；失败或重启遗留 `interrupted` 须显式 `retry=true` 或 `regenerate=true`。
+5. 同角色同一会话同时只生成一个回复；同角色不同会话互不阻塞；只有该会话最新用户消息允许新增或重新生成回复，旧的已完成回复仍可取回。
 
-上下文最多最近 20 条用户记录及其已完成回复。用户内容与单条回复均限制 4000 Unicode 字符。
-聊天接口只支持同步纯文本，没有工具调用、流式输出或多机器人路由。独立的持久后台任务接口见 development-chat.md。
+上下文最多取当前角色当前会话最近 20 条用户记录及其已完成回复。用户输入限制 4000 Unicode 字符，单条模型回复上限放宽至 16000 Unicode 字符（可完整回传作为后续上下文）。
+聊天接口已支持流式输出与多角色/多会话上下文隔离，暂不支持工具调用。独立的持久后台任务接口见 development-chat.md。
 取消/网络错误可能发生在供应商已执行之后，因此明确重试仍可能再次计费，不承诺计费上的 exactly-once。
 APP 切页或进程退出可能取消请求；刷新历史后查看结果，不能把该同步流程视作持久后台任务。
 

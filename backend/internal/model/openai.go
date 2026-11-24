@@ -24,6 +24,14 @@ type Message struct {
 
 const DefaultCompletionTimeout = 45 * time.Second
 
+// MaxReplyRunes bounds one assistant turn. A long reply is still sent back to the model as
+// history, so assistant messages use a wider budget than user and system messages.
+const MaxReplyRunes = 16000
+
+// maxPromptRunes bounds user and system text. It stays narrow on purpose: only a model
+// reply may be long.
+const maxPromptRunes = 4000
+
 type Completer interface {
 	Complete(context.Context, []Message) (string, error)
 }
@@ -85,7 +93,11 @@ func validateMessages(messages []Message) error {
 		if m.Role != "system" && m.Role != "user" && m.Role != "assistant" {
 			return errors.New("unsupported message role")
 		}
-		if strings.TrimSpace(m.Content) == "" || !utf8.ValidString(m.Content) || utf8.RuneCountInString(m.Content) > 4000 {
+		limit := maxPromptRunes
+		if m.Role == "assistant" {
+			limit = MaxReplyRunes
+		}
+		if strings.TrimSpace(m.Content) == "" || !utf8.ValidString(m.Content) || utf8.RuneCountInString(m.Content) > limit {
 			return errors.New("invalid message content")
 		}
 	}
@@ -255,7 +267,7 @@ func (c *OpenAI) CompleteStream(ctx context.Context, messages []Message, onDelta
 		if !utf8.ValidString(content.String()) {
 			return false, errors.New("invalid model stream content")
 		}
-		if utf8.RuneCountInString(content.String()) > 4000 {
+		if utf8.RuneCountInString(content.String()) > MaxReplyRunes {
 			return false, errors.New("model stream exceeds length limit")
 		}
 		if onDelta != nil {

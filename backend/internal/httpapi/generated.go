@@ -122,6 +122,9 @@ func NewGenerated(path, token string, bots *Bots) *Generated {
 	if err != nil || !g.load() {
 		g.fail()
 	}
+	if bots != nil {
+		bots.RegisterDeleteHook(g)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/app-drafts", g.jobs)
 	mux.HandleFunc("POST /api/app-drafts", g.createJob)
@@ -380,6 +383,28 @@ func (g *Generated) runNext(parent context.Context, provider model.Completer, ti
 	}
 	return true
 }
+
+// CheckBotDeletable refuses a role that still owns a draft or proposal, so no generated
+// record is ever left pointing at a removed role, and reports a faulted store instead of
+// deleting against data that cannot be rewritten.
+func (g *Generated) CheckBotDeletable(botID string) (int, string) {
+	if g == nil {
+		return 0, ""
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.broken {
+		return 503, "storage_unavailable"
+	}
+	if slices.ContainsFunc(g.state.Jobs, func(j genJob) bool { return j.BotID == botID }) {
+		return 409, "bot_in_use"
+	}
+	return 0, ""
+}
+
+// PurgeBot removes nothing: a role that owns generated records is refused above, so this
+// store never holds child data of a deletable role.
+func (g *Generated) PurgeBot(string) (func() error, int, string) { return nil, 0, "" }
 
 func (g *Generated) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")

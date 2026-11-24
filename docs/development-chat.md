@@ -10,20 +10,20 @@
 通过已授权设备的 adb reverse tcp:8080 tcp:8080 连接本机 Go 服务；不要将此开发服务公开部署。
 
 ## 已实现约束
-- GET /api/chat/messages：返回历史及实际 modelConfigured 状态（支持 `?botId=...`，默认 `abu`）。
-- POST /api/chat/messages：id/content/botId；首次 201，相同 id/content 重试 200，不重复保存。
-- POST /api/chat/replies：非流式生成回复；POST /api/chat/replies/stream：SSE 流式推送 `delta`/`done`/`error` 事件（可选 `runId` 标识本轮生成）。
-- POST /api/chat/replies/cancel：按 `(botId, messageId)` 及可选 `runId` 显式中止在途回复，防止迟到取消误杀新一轮重试；已生成部分以 `interrupted` 保留，可显式重试。
-- DELETE /api/chat/messages/{id} 与 DELETE /api/chat/messages：按角色删除单条消息或清空当前角色记录（回复生成中返回 409）。
-- 相同 id 不同内容返回 409；无令牌/错误令牌 401；输入无效 400。
-- 最多 200 条，每条最多 4000 Unicode 字符；仅用户文本，不接受 role 等额外字段。
-- 安卓聊天详情支持流式渲染与停止、Markdown（标题/粗斜体/列表/引用/代码块与复制）、多行自适应输入、消息复制与单条删除/清空对话。
-- 后端本地 JSON 快照，互斥写入、临时文件同步后原子替换；单进程开发存储。
-- 默认 backend/data/messages.json（从 backend/ 启动时），已加入忽略规则。
+- 后端默认监听 `127.0.0.1:8080`，支持通过 `-listen` 参数或 `ABU_LISTEN_ADDR` 环境变量配置合法监听地址。
+- 会话管理：`GET /api/chat/sessions?botId=...` 列出当前角色会话（默认会话 `default` 恒在并置顶，其余按最近活跃时间倒序）；`POST /api/chat/sessions` 新建会话；`PUT /api/chat/sessions/{id}` 重命名会话（含默认会话）；`DELETE /api/chat/sessions/{id}?botId=...` 删除非默认会话及其消息。每角色最多 50 个会话（含默认会话）。
+- `GET /api/chat/messages`：支持 `?botId=...&sessionId=...&before=<msgId>&limit=1..200` 游标分页，返回 `{messages, modelConfigured, sessionId, hasMore, nextBefore?}`。
+- `POST /api/chat/messages`：`{id, content, botId?, sessionId?}`；首次 201，相同 `id/content/sessionId` 重试 200，不重复保存。单会话最多 500 条、全局最多 5000 条消息。
+- `PUT /api/chat/messages/{id}`：`{content, botId?, sessionId?}`；允许编辑该会话最新一条消息（非生成中），保存后清空原回复状态便于重发；非最新消息返回 409 `not_latest_message`。
+- `POST /api/chat/replies` 与 `POST /api/chat/replies/stream`：支持 `messageId`、`retry`、`regenerate`（允许对当前会话最新一条已完成消息重新生成）、`runId`、`botId`、`sessionId`；流式通过 SSE 推送 `delta`/`done`/`error`。单条回复上限 16000 Unicode 字符。
+- `POST /api/chat/replies/cancel`：按 `(botId, sessionId, messageId)` 及可选 `runId` 显式中止在途回复，防止迟到取消误杀新一轮重试；已生成部分以 `interrupted` 保留，可显式重试。
+- `DELETE /api/chat/messages/{id}` 与 `DELETE /api/chat/messages`：支持 `?botId=...&sessionId=...`，按会话删除单条消息或清空当前会话记录（回复生成中返回 409）。
+- 相同 id 不同内容返回 409；无令牌/错误令牌 401；输入无效 400。用户输入最多 4000 Unicode 字符，不接受 role 等额外字段。
+- 安卓聊天详情支持多会话切换/新建/重命名/删除、顶部“加载更早消息”分页、流式渲染与停止、已完成回复重新生成、编辑最新消息并重发、会话内搜索与跳转、增强 Markdown（1~6 级标题/粗斜体/删除线/缩进列表/引用/分割线/GFM 表格/代码块复制/安全确认外部链接）、多行自适应输入、消息复制与单条删除/清空对话。
+- 后端本地单文件 JSON 快照（`messages.json` 兼容旧数组与 v2 `{version, sessions, messages}` 格式，上限 32 MiB），互斥写入、临时文件同步后原子替换；单进程开发存储。
 - 这不是最终 PostgreSQL 实现；禁止多个后端实例共享该文件，不承诺断电级耐久性。
-- 安卓开发令牌、未发送草稿、重试编号仅在本次运行内保留。重开需重新填令牌，已保存历史从服务读取。
-- 原进程仍存活时，失败重试使用相同编号；进程被杀后未确认提交的自动恢复尚未实现。
-- 账号连接、长期记忆抽取、生产配对、导出、分页仍待实现。
+- 安卓设置页支持配置服务端地址（Debug 支持 `http://`/`https://`，Release 强制 `https://`）并通过 AndroidKeyStore AES-GCM 加密持久化访问令牌（重开自动恢复，支持一键清除）；未发送草稿按 `(botId, sessionId)` 持久化到应用私有存储；未确认提交的重试编号仍仅在当前进程内保留。
+- 账号连接、长期记忆抽取、数据导出与生产级数据库仍待实现。
 
 ## 文本后台任务协议
 

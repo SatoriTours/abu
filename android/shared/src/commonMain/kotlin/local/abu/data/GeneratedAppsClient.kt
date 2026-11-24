@@ -16,7 +16,11 @@ import kotlin.time.Instant
 
 class GeneratedAppsException(val code: String, val statusCode: Int? = null) : Exception(code)
 
-class GeneratedAppsClient(private val http: HttpClient) {
+class GeneratedAppsClient(
+    private val http: HttpClient,
+    // Resolved per request so a changed setting reaches the client that already exists.
+    private val baseUrl: () -> String = { DEFAULT_SERVER_BASE_URL },
+) {
     init { require(http.pluginOrNull(HttpRedirect) == null) { "Generated app client must disable redirects" } }
 
     suspend fun createDraft(dev: String, input: DraftRequest): GeneratedJob =
@@ -168,7 +172,7 @@ class GeneratedAppsClient(private val http: HttpClient) {
         token: String, method: HttpMethod, path: String, body: JsonObject?, max: Int, parse: (ByteArray, String?) -> T,
     ): T = try {
         withTimeoutOrNull(12_000) {
-            http.prepareRequest("http://127.0.0.1:8080$path") {
+            http.prepareRequest(endpoint() + path) {
                 this.method = method
                 expectSuccess = false
                 bearerAuth(token)
@@ -197,6 +201,8 @@ class GeneratedAppsClient(private val http: HttpClient) {
     } catch (_: Exception) {
         throw GeneratedAppsException("connection_failed")
     }
+
+    private fun endpoint(): String = baseUrl().trimEnd('/')
 
     private fun appId(id: String) = id.also { require(validGeneratedAppId(it)) }
     private fun draftPath(id: String) = "$drafts/${validateBotId(id)}"

@@ -133,5 +133,49 @@ class BotsClientTest {
         }
     }
 
+    @Test fun deletesOneRole() = runBlocking<Unit> {
+        HttpClient(MockEngine { r ->
+            assertEquals(HttpMethod.Delete, r.method)
+            assertEquals("/api/bots/leaf", r.url.encodedPath)
+            assertEquals("Bearer dev", r.headers[HttpHeaders.Authorization])
+            respond("""{"deleted":true,"id":"leaf"}""", HttpStatusCode.OK, headers)
+        }) { followRedirects = false }.use {
+            BotsClient(it).delete("dev", "leaf")
+        }
+    }
+
+    @Test fun deleteRefusesUnsafeIdsAndReportsServerCodes() = runBlocking<Unit> {
+        var calls = 0
+        HttpClient(MockEngine { calls++; respond("{}", HttpStatusCode.OK, headers) }) { followRedirects = false }.use {
+            for (bad in listOf("", "leaf/1", "leaf 1", "leaf.1")) {
+                assertFailsWith<IllegalArgumentException> { BotsClient(it).delete("dev", bad) }
+            }
+        }
+        assertEquals(0, calls)
+        for ((code, status) in listOf(
+            "bot_busy" to HttpStatusCode.Conflict,
+            "bot_in_use" to HttpStatusCode.Conflict,
+            "cannot_delete_default_bot" to HttpStatusCode.Conflict,
+            "invalid_bot_id" to HttpStatusCode.BadRequest,
+            "storage_unavailable" to HttpStatusCode.ServiceUnavailable,
+        )) {
+            HttpClient(MockEngine {
+                respond("""{"error":"$code"}""", status, headers)
+            }) { followRedirects = false }.use {
+                val failure = assertFailsWith<BotsException> { BotsClient(it).delete("dev", "leaf") }
+                assertEquals(code, failure.code)
+                assertEquals(status.value, failure.statusCode)
+            }
+        }
+    }
+
+    @Test fun deleteRejectsAnUnexpectedAcknowledgement() = runBlocking<Unit> {
+        for (body in listOf("""{"deleted":false,"id":"leaf"}""", """{"deleted":true,"id":"other"}""", """{"deleted":"true","id":"leaf"}""")) {
+            HttpClient(MockEngine { respond(body, HttpStatusCode.OK, headers) }) { followRedirects = false }.use {
+                assertEquals("invalid_response", assertFailsWith<BotsException> { BotsClient(it).delete("dev", "leaf") }.code)
+            }
+        }
+    }
+
     private fun body(content: OutgoingContent) = (content as OutgoingContent.ByteArrayContent).bytes().decodeToString()
 }

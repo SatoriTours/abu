@@ -113,6 +113,9 @@ class ChatUpgradeLogicTest {
         )
         assertEquals("完整回复", formatPreview(listOf(completed)))
         assertEquals("半截回复", formatPreview(listOf(completed.copy(reply = "半截回复", replyStatus = "interrupted"))))
+        assertEquals("今日节奏建议", formatPreview(listOf(completed.copy(reply = "## **今日节奏建议**\n第二行"))))
+        assertEquals("事项", formatPreview(listOf(completed.copy(reply = "1. *事项*"))))
+        assertEquals("snake_case_name 重点", formatPreview(listOf(completed.copy(reply = "> - snake_case_name _重点_"))))
         assertEquals("提问", formatPreview(listOf(completed.copy(reply = " ", replyStatus = "interrupted"))))
         assertEquals("提问", formatPreview(listOf(completed.copy(reply = "", replyStatus = "running"))))
         assertEquals("提问", formatPreview(listOf(completed.copy(reply = "  ", replyStatus = "completed"))))
@@ -156,13 +159,101 @@ class ChatUpgradeLogicTest {
 
     @Test
     fun closedFenceAndDeepHeading() {
-        val blocks = parseMarkdown("```\nline\r\n```\n\n### 三级\n\n#### 太深")
+        val blocks = parseMarkdown("```\nline\r\n```\n\n### 三级\n\n#### 四级")
         assertEquals(3, blocks.size)
         val code = blocks[0] as MarkdownBlock.CodeBlock
         assertEquals("", code.language)
         assertEquals("line", code.code)
         assertEquals(3, (blocks[1] as MarkdownBlock.Heading).level)
-        assertTrue(blocks[2] is MarkdownBlock.Paragraph)
+        assertEquals(4, (blocks[2] as MarkdownBlock.Heading).level)
+    }
+
+    @Test
+    fun parsesSixHeadingLevelsAndHorizontalRules() {
+        val blocks = parseMarkdown("###### 六级\n\n---\n\n* * *\n\n___\n\n####### 七级")
+        assertEquals(5, blocks.size)
+        assertEquals(6, (blocks[0] as MarkdownBlock.Heading).level)
+        assertEquals(listOf(InlineSpan.Text("六级")), (blocks[0] as MarkdownBlock.Heading).spans)
+        assertSame(MarkdownBlock.HorizontalRule, blocks[1])
+        assertSame(MarkdownBlock.HorizontalRule, blocks[2])
+        assertSame(MarkdownBlock.HorizontalRule, blocks[3])
+        // Seven hashes are not a heading, and the paragraph must keep every character.
+        assertEquals(listOf(InlineSpan.Text("####### 七级")), (blocks[4] as MarkdownBlock.Paragraph).spans)
+    }
+
+    @Test
+    fun parsesPipeTableWithInlineCells() {
+        val blocks = parseMarkdown("| 名称 | 值 |\n| --- | :---: |\n| **甲** | 1 |\n| 乙 | 2 |")
+        assertEquals(1, blocks.size)
+        val table = blocks[0] as MarkdownBlock.Table
+        assertEquals(listOf(listOf(InlineSpan.Text("名称")), listOf(InlineSpan.Text("值"))), table.headers)
+        assertEquals(2, table.rows.size)
+        assertEquals(listOf(InlineSpan.Bold("甲")), table.rows[0][0])
+        assertEquals(listOf(InlineSpan.Text("1")), table.rows[0][1])
+        assertEquals(listOf(InlineSpan.Text("乙")), table.rows[1][0])
+        assertEquals(listOf(InlineSpan.Text("2")), table.rows[1][1])
+    }
+
+    @Test
+    fun incompleteTableStaysParagraph() {
+        // A streamed table stays a normal paragraph until its separator row is complete.
+        assertTrue(parseMarkdown("| 名称 | 值 |").single() is MarkdownBlock.Paragraph)
+        assertTrue(parseMarkdown("| 名称 | 值 |\n| --- ").all { it is MarkdownBlock.Paragraph })
+        val mixed = parseMarkdown("说明\n\n| 名称 | 值 |\n| --- | --- |\n| 甲 | 1 |")
+        assertEquals(2, mixed.size)
+        assertTrue(mixed[0] is MarkdownBlock.Paragraph)
+        assertEquals(1, (mixed[1] as MarkdownBlock.Table).rows.size)
+    }
+
+    @Test
+    fun plainTextPipesNeedASeparatorRow() {
+        // A pipe row without a separator row is still ordinary text.
+        val paragraph = parseMarkdown("a | b\n下一行")
+        assertEquals(1, paragraph.size)
+        assertEquals(listOf(InlineSpan.Text("a | b\n下一行")), (paragraph[0] as MarkdownBlock.Paragraph).spans)
+        // With a separator row the same line is a header, and no trailing rows are invented.
+        val table = parseMarkdown("a | b\n--- | ---")
+        assertEquals(1, table.size)
+        val parsed = table[0] as MarkdownBlock.Table
+        assertEquals(listOf(listOf(InlineSpan.Text("a")), listOf(InlineSpan.Text("b"))), parsed.headers)
+        assertEquals(0, parsed.rows.size)
+    }
+
+    @Test
+    fun listItemsCarryIndentDepth() {
+        val blocks = parseMarkdown("- 一\n  - 一点一\n    - 一点一点一\n1. 甲\n   1. 甲一")
+        assertEquals(2, blocks.size)
+        val bullets = blocks[0] as MarkdownBlock.BulletList
+        assertEquals(listOf(InlineSpan.Text("一")), bullets.items[0])
+        assertEquals(listOf(0, 1, 2), bullets.indents)
+        assertEquals(listOf(0, 1, 2), bullets.entries.map { it.indent })
+        assertEquals(listOf(InlineSpan.Text("一点一点一")), bullets.entries[2].spans)
+        val ordered = blocks[1] as MarkdownBlock.OrderedList
+        assertEquals(listOf(1, 1), ordered.items.map { it.first })
+        assertEquals(listOf(0, 1), ordered.entries.map { it.indent })
+        assertEquals(listOf(InlineSpan.Text("甲一")), ordered.entries[1].spans)
+    }
+
+    @Test
+    fun parsesStrikethroughBoldItalicAndSafeLinks() {
+        assertEquals(listOf(InlineSpan.Strikethrough("删除")), parseInline("~~删除~~"))
+        assertEquals(listOf(InlineSpan.BoldItalic("又粗又斜")), parseInline("***又粗又斜***"))
+        assertEquals(
+            listOf(InlineSpan.Text("见 "), InlineSpan.Link("文档", "https://example.test/a?b=1")),
+            parseInline("见 [文档](https://example.test/a?b=1)"),
+        )
+        // Only absolute http(s) targets become links; other schemes stay literal text.
+        assertEquals(listOf(InlineSpan.Text("[坏](javascript:alert(1))")), parseInline("[坏](javascript:alert(1))"))
+        assertEquals(listOf(InlineSpan.Text("[坏](ftp://x)")), parseInline("[坏](ftp://x)"))
+        assertEquals(listOf(InlineSpan.Text("[坏](https://exa mple)")), parseInline("[坏](https://exa mple)"))
+    }
+
+    @Test
+    fun halfStreamedInlineMarkersStayLiteral() {
+        assertEquals(listOf(InlineSpan.Text("未闭合 ~~删除")), parseInline("未闭合 ~~删除"))
+        assertEquals(listOf(InlineSpan.Text("半截 ***粗")), parseInline("半截 ***粗"))
+        assertEquals(listOf(InlineSpan.Text("半截 [链接](htt")), parseInline("半截 [链接](htt"))
+        assertEquals(listOf(InlineSpan.Text("尾巴 ~~")), parseInline("尾巴 ~~"))
     }
 
     @Test

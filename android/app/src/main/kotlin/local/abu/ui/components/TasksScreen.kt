@@ -1,5 +1,8 @@
 package local.abu.ui.components
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -11,6 +14,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -129,25 +133,22 @@ internal fun TasksScreen(
                 TaskSurface {
                     Text(if (pending != null) "待确认 · ${botName(pending.botId)}"
                         else selected?.let { "新建任务 · ${botName(it)}" } ?: "单次文本任务", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    OutlinedTextField(
+                    AbuTextField(
                         value = pending?.content ?: state.draft,
                         onValueChange = state::edit,
-                        label = { Text(if (pending == null) "任务正文" else "待确认正文") },
+                        label = if (pending == null) "任务正文" else "待确认正文",
+                        placeholder = "输入要后台执行的文本任务…",
                         readOnly = state.busy || pending != null,
                         enabled = state.hasToken && (selected != null || pending != null),
+                        singleLine = false,
                         minLines = 3,
                         maxLines = 6,
-                        shape = RoundedCornerShape(14.dp),
                         isError = pending == null && state.draftLength > TaskTextLimit,
+                        supportingText = if (pending == null) {
+                            if (state.draftLength > TaskTextLimit) "最多 $TaskTextLimit 字符，请缩短正文。"
+                            else "${state.draftLength} / $TaskTextLimit 字符"
+                        } else null,
                         modifier = Modifier.fillMaxWidth(),
-                        supportingText = {
-                            if (pending == null) {
-                                Text(
-                                    if (state.draftLength > TaskTextLimit) "最多 $TaskTextLimit 字符，请缩短正文。"
-                                    else "${state.draftLength} / $TaskTextLimit 字符"
-                                )
-                            }
-                        }
                     )
                     if (pending != null && state.operation != TasksState.Operation.SUBMIT) {
                         Text(
@@ -242,24 +243,38 @@ private fun TaskCard(
         Text("负责角色：$botName", style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (expanded) {
-            SelectionContainer {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(task.content)
-                    task.result?.let { Text("结果：\n$it") }
-                    task.errorCode?.let {
-                        Text(
-                            when (it) {
-                                "model_failed" -> "模型调用失败。"
-                                "model_timeout" -> "模型调用超时。"
-                                "interrupted" -> "任务在后台退出或重启时中断。"
-                                "storage_uncertain" -> "最终结果未能确认写入存储。"
-                                else -> "任务未成功完成。"
-                            },
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
-                    Text("更新：${task.updatedAt}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val context = LocalContext.current
+            fun copyText(text: String) {
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+                clipboard.setPrimaryClip(ClipData.newPlainText("abu-task", text))
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SelectionContainer { Text(task.content) }
+                task.result?.let { resultText ->
+                    Text(
+                        "结果：",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    MarkdownContent(
+                        text = resultText,
+                        onCopyCode = ::copyText,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
+                task.errorCode?.let {
+                    Text(
+                        when (it) {
+                            "model_failed" -> "模型调用失败。"
+                            "model_timeout" -> "模型调用超时。"
+                            "interrupted" -> "任务在后台退出或重启时中断。"
+                            "storage_uncertain" -> "最终结果未能确认写入存储。"
+                            else -> "任务未成功完成。"
+                        },
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                Text("更新：${task.updatedAt}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
             Text(task.content, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -282,9 +297,9 @@ private fun TaskCard(
 private fun TaskSurface(content: @Composable ColumnScope.() -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
-        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(0.75.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column(
             modifier = Modifier.padding(16.dp),

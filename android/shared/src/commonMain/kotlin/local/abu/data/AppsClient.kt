@@ -37,7 +37,11 @@ data class TodoUpdate(val mutationId: String, val baseRevision: Long, val items:
 class AppsException(val code: String, val statusCode: Int? = null, val writeOutcomeUnknown: Boolean = false) : Exception(code)
 
 /** Receives the existing redirect-disabled client. The caller owns that client and session lifetime. */
-class AppsClient(private val client: HttpClient) {
+class AppsClient(
+    private val client: HttpClient,
+    // Resolved per request so a changed setting reaches the client that already exists.
+    private val baseUrl: () -> String = { DEFAULT_SERVER_BASE_URL },
+) {
     init {
         require(client.pluginOrNull(HttpRedirect) == null) { "App HTTP client must disable redirects" }
     }
@@ -119,7 +123,7 @@ class AppsClient(private val client: HttpClient) {
         try {
             // Keep the per-call deadline separate from cancellation of the caller's coroutine.
             return withTimeoutOrNull(12_000) {
-                client.prepareRequest(endpoint + path) {
+                client.prepareRequest(endpoint() + path) {
                     method = verb
                     expectSuccess = false
                     bearerAuth(token)
@@ -149,6 +153,8 @@ class AppsClient(private val client: HttpClient) {
         }
     }
 
+    private fun endpoint(): String = baseUrl().trimEnd('/') + endpointPath
+
     private fun errorCode(status: Int, body: ByteArray): String {
         return try {
             val json = parseAppJson(body)
@@ -166,7 +172,7 @@ class AppsClient(private val client: HttpClient) {
     }
 
     private companion object {
-        const val endpoint = "http://127.0.0.1:8080/api/apps"
+        const val endpointPath = "/api/apps"
         const val manifestLimit = 16L * 1024
         const val snapshotLimit = 256L * 1024
         val sessionPattern = Regex("[A-Za-z0-9_-]{1,140}")

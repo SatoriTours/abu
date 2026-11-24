@@ -22,7 +22,11 @@ data class Bot(val id: String, val name: String, val instructions: String, val a
 class BotsException(val code: String, val statusCode: Int? = null) : Exception(code)
 
 /** Uses the existing redirect-disabled HTTP client; its lifecycle belongs to the caller. */
-class BotsClient(private val http: HttpClient) {
+class BotsClient(
+    private val http: HttpClient,
+    // Resolved per request so a changed setting reaches the client that already exists.
+    private val baseUrl: () -> String = { DEFAULT_SERVER_BASE_URL },
+) {
     init {
         require(http.pluginOrNull(HttpRedirect) == null) { "Bot HTTP client must disable redirects" }
     }
@@ -65,10 +69,26 @@ class BotsClient(private val http: HttpClient) {
         }
     }
 
+    /**
+     * Deletes one role. The server removes its chat messages and finished tasks first, so a
+     * refused delete never leaves orphaned records behind.
+     */
+    suspend fun delete(token: String, id: String) {
+        validateBotId(id)
+        request(token, HttpMethod.Delete, "/$id") { body ->
+            body.exact("deleted", "id")
+            val deleted = body.getValue("deleted").jsonPrimitive
+            require(!deleted.isString && deleted.boolean)
+            require(body.string("id") == id)
+        }
+    }
+
+    private fun endpoint(): String = baseUrl().trimEnd('/') + "/api/bots"
+
     private suspend fun <T> request(
         token: String, method: HttpMethod, path: String, body: JsonObject? = null, parse: (JsonObject) -> T,
     ): T = try {
-        http.prepareRequest("http://127.0.0.1:8080/api/bots$path") {
+        http.prepareRequest(endpoint() + path) {
             this.method = method
             expectSuccess = false
             bearerAuth(token)
@@ -117,7 +137,8 @@ class BotsClient(private val http: HttpClient) {
     private companion object {
         const val maxRevision = (1L shl 53) - 1
         val serverErrors = setOf("invalid_bot", "unauthorized", "bot_not_found", "id_conflict", "bot_limit",
-            "revision_conflict", "body_too_large", "storage_unavailable")
+            "revision_conflict", "body_too_large", "storage_unavailable", "invalid_bot_id",
+            "cannot_delete_default_bot", "bot_busy", "bot_in_use")
     }
 }
 

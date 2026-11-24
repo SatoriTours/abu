@@ -15,10 +15,14 @@ sealed interface HealthResult {
 }
 
 // The caller owns the HTTP client. This initial endpoint is development-only.
-class HealthClient(private val client: HttpClient) {
+class HealthClient(
+    private val client: HttpClient,
+    // Resolved per request so a changed setting reaches the client that already exists.
+    private val baseUrl: () -> String = { DEFAULT_SERVER_BASE_URL },
+) {
     suspend fun check(): HealthResult = try {
         withTimeout(8_000) {
-            client.prepareGet("http://127.0.0.1:8080/healthz").execute { response ->
+            client.prepareGet(baseUrl().trimEnd('/') + "/healthz").execute { response ->
                 if (response.status != HttpStatusCode.OK) {
                     return@execute HealthResult.Failed("服务返回 HTTP ${response.status.value}")
                 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -14,7 +15,7 @@ import (
 )
 
 // replyTextLimit is the maximum stored reply length, shared with the model contract.
-const replyTextLimit = 4000
+const replyTextLimit = model.MaxReplyRunes
 
 func rolePrompt(instructions string) []model.Message {
 	if strings.TrimSpace(instructions) == "" {
@@ -41,6 +42,8 @@ func optionalRunID(fields map[string]json.RawMessage, runID string) bool {
 type replyPlan struct {
 	bot         Bot
 	messageID   string
+	sessionID   string
+	key         [2]string
 	alreadyDone bool
 	message     Message
 	context     []model.Message
@@ -58,86 +61,112 @@ func (s *chatStore) planReply(w http.ResponseWriter, r *http.Request) (*replyPla
 	var input struct {
 		MessageID string `json:"messageId"`
 		Retry     bool   `json:"retry"`
-		RunID     string `json:"runId"`
+		// Regenerate replaces a stored reply on the newest turn instead of returning it.
+		Regenerate bool   `json:"regenerate"`
+		RunID      string `json:"runId"`
+		SessionID  string `json:"sessionId"`
 	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2048))
-	fields, valid := scopedBody(raw, []string{"messageId"}, []string{"retry", "runId"})
+	fields, valid := scopedBody(raw, []string{"messageId"}, []string{"retry", "regenerate", "runId", "sessionId"})
 	if err != nil || !valid || json.Unmarshal(raw, &input) != nil || input.MessageID == "" ||
 		len(input.MessageID) > 128 || !optionalRunID(fields, input.RunID) {
 		apiError(w, 400, "invalid_reply_request")
 		return nil, false
 	}
-	bot, ok := s.bots.resolve(w, bodyBotID(fields))
-	if !ok {
+	sessionID, sessionOK := optionalSessionID(fields)
+	if !sessionOK {
+		apiError(w, 400, "invalid_session_id")
 		return nil, false
 	}
-	if s.provider == nil {
-		apiError(w, 503, "model_not_configured")
-		return nil, false
-	}
-	plan := &replyPlan{bot: bot, messageID: input.MessageID}
-	s.mu.Lock()
-	index, latest := -1, -1
-	for i, m := range s.messages {
-		if m.BotID == bot.ID {
-			latest = i
-			if m.ID == input.MessageID {
-				index = i
+	// The role read lock covers the existence check, the message state switch and its snapshot
+	// write, and the in-flight marker. Publishing that marker under the read lock is what keeps
+	// a concurrent DELETE refused as bot_busy instead of racing this run. The model call itself
+	// happens after the lock is released, so no network wait blocks a role deletion.
+	var plan *replyPlan
+	if status, code := s.bots.withBotReadLock(bodyBotID(fields), func(bot Bot) {
+		if s.provider == nil {
+			apiError(w, 503, "model_not_configured")
+			return
+		}
+		p := &replyPlan{bot: bot, messageID: input.MessageID, sessionID: sessionID,
+			key: [2]string{bot.ID, sessionID}}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if !s.hasSessionLocked(bot.ID, sessionID) {
+			apiError(w, 404, "session_not_found")
+			return
+		}
+		index, latest := -1, -1
+		for i, m := range s.messages {
+			if m.BotID == bot.ID && m.SessionID == sessionID {
+				latest = i
+				if m.ID == input.MessageID {
+					index = i
+				}
 			}
 		}
-	}
-	if index < 0 {
-		s.mu.Unlock()
-		apiError(w, 404, "message_not_found")
-		return nil, false
-	}
-	message := s.messages[index]
-	if message.ReplyStatus == "completed" {
-		s.mu.Unlock()
-		plan.alreadyDone = true
-		plan.message = message
-		return plan, true
-	}
-	if s.generating[bot.ID] || index != latest {
-		s.mu.Unlock()
-		apiError(w, 409, "reply_in_progress_or_not_latest")
-		return nil, false
-	}
-	if message.ReplyStatus != "" && !input.Retry {
-		s.mu.Unlock()
-		apiError(w, 409, "explicit_retry_required")
-		return nil, false
-	}
-	next := append([]Message{}, s.messages...)
-	next[index].ReplyStatus = "running"
-	if err := s.save(next); err != nil {
-		s.mu.Unlock()
-		apiError(w, 500, "storage_failed")
-		return nil, false
-	}
-	s.messages = next
-	s.generating[bot.ID] = true
-	// Limit to the last 20 turns of this role, not the last 20 global records.
-	history := make([]Message, 0, 20)
-	for i := index; i >= 0 && len(history) < 20; i-- {
-		if s.messages[i].BotID == bot.ID {
-			history = append(history, s.messages[i])
+		if index < 0 {
+			apiError(w, 404, "message_not_found")
+			return
 		}
-	}
-	contextMessages := rolePrompt(bot.Instructions)
-	for i := len(history) - 1; i >= 0; i-- {
-		m := history[i]
-		contextMessages = append(contextMessages, model.Message{Role: "user", Content: m.Content})
-		if m.ReplyStatus == "completed" {
-			contextMessages = append(contextMessages, model.Message{Role: "assistant", Content: m.Reply})
+		message := s.messages[index]
+		if !input.Regenerate && message.ReplyStatus == "completed" {
+			p.alreadyDone = true
+			p.message = message
+			plan = p
+			return
 		}
+		if s.generating[p.key] || index != latest {
+			apiError(w, 409, "reply_in_progress_or_not_latest")
+			return
+		}
+		// Regenerate is an explicit, always allowed replacement of any stored reply on the
+		// newest turn, including a completed one, so it needs no separate retry flag.
+		if !input.Regenerate && message.ReplyStatus != "" && !input.Retry {
+			apiError(w, 409, "explicit_retry_required")
+			return
+		}
+		next := slices.Clone(s.messages)
+		next[index].ReplyStatus = "running"
+		if input.Regenerate {
+			// The stored reply must not become assistant context for the run that replaces it.
+			next[index].Reply = ""
+		}
+		sessions := touchSession(s.sessions, bot.ID, sessionID, next[index].CreatedAt)
+		if err := s.commit(sessions, next); err != nil {
+			apiError(w, 500, "storage_failed")
+			return
+		}
+		s.generating[p.key] = true
+		// Limit to the last 20 turns of this session, not the last 20 global records.
+		history := make([]Message, 0, 20)
+		for i := index; i >= 0 && len(history) < 20; i-- {
+			if next[i].BotID == bot.ID && next[i].SessionID == sessionID {
+				history = append(history, next[i])
+			}
+		}
+		contextMessages := rolePrompt(bot.Instructions)
+		for i := len(history) - 1; i >= 0; i-- {
+			m := history[i]
+			contextMessages = append(contextMessages, model.Message{Role: "user", Content: m.Content})
+			if m.ReplyStatus == "completed" {
+				contextMessages = append(contextMessages, model.Message{Role: "assistant", Content: m.Reply})
+			}
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), model.DefaultCompletionTimeout)
+		active := &activeReply{messageID: input.MessageID, runID: input.RunID, cancel: cancel}
+		s.active[p.key] = active
+		p.message, p.context = message, contextMessages
+		p.ctx, p.cancel, p.active = ctx, cancel, active
+		plan = p
+	}); code != "" {
+		apiError(w, status, code)
+		return nil, false
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), model.DefaultCompletionTimeout)
-	active := &activeReply{messageID: input.MessageID, runID: input.RunID, cancel: cancel}
-	s.active[bot.ID] = active
-	s.mu.Unlock()
-	plan.message, plan.context = message, contextMessages
-	plan.ctx, plan.cancel, plan.active = ctx, cancel, active
+	// Every failure inside the scoped callback already wrote its response and left no plan.
+	if plan == nil {
+		return nil, false
+	}
 	return plan, true
 }
 
@@ -153,15 +182,15 @@ func (s *chatStore) settleReply(plan *replyPlan, result, partial string, callErr
 	// A cancel always wins over a result that arrived at the same moment.
 	wasCancelled := plan.active.cancelled || errors.Is(plan.ctx.Err(), context.Canceled)
 	// Unregister before unlocking so a later cancelReply sees no active generation at all.
-	if current := s.active[plan.bot.ID]; current == plan.active {
-		delete(s.active, plan.bot.ID)
+	if current := s.active[plan.key]; current == plan.active {
+		delete(s.active, plan.key)
 	}
-	delete(s.generating, plan.bot.ID)
-	index := s.locate(plan.bot.ID, plan.messageID)
+	delete(s.generating, plan.key)
+	index := s.locate(plan.bot.ID, plan.sessionID, plan.messageID)
 	if index < 0 {
 		return Message{}, "failed"
 	}
-	next := append([]Message{}, s.messages...)
+	next := slices.Clone(s.messages)
 	outcome := "completed"
 	switch {
 	case wasCancelled:
@@ -181,12 +210,11 @@ func (s *chatStore) settleReply(plan *replyPlan, result, partial string, callErr
 		next[index].ReplyStatus = "failed"
 		outcome = "failed"
 	}
-	if err := s.save(next); err != nil {
+	if err := s.commit(s.sessions, next); err != nil {
 		// Keep a visible uncertain state. An explicit retry may incur another model call.
 		s.messages[index].ReplyStatus = "interrupted"
 		return s.messages[index], "storage_failed"
 	}
-	s.messages = next
 	return s.messages[index], outcome
 }
 
@@ -268,12 +296,18 @@ func (s *chatStore) cancelReply(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		MessageID string `json:"messageId"`
 		RunID     string `json:"runId"`
+		SessionID string `json:"sessionId"`
 	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2048))
-	fields, valid := scopedBody(raw, []string{"messageId"}, []string{"runId"})
+	fields, valid := scopedBody(raw, []string{"messageId"}, []string{"runId", "sessionId"})
 	if err != nil || !valid || json.Unmarshal(raw, &input) != nil || input.MessageID == "" ||
 		len(input.MessageID) > 128 || !optionalRunID(fields, input.RunID) {
 		apiError(w, 400, "invalid_reply_request")
+		return
+	}
+	sessionID, sessionOK := optionalSessionID(fields)
+	if !sessionOK {
+		apiError(w, 400, "invalid_session_id")
 		return
 	}
 	bot, ok := s.bots.resolve(w, bodyBotID(fields))
@@ -281,7 +315,8 @@ func (s *chatStore) cancelReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	if s.locate(bot.ID, input.MessageID) < 0 {
+	key := [2]string{bot.ID, sessionID}
+	if s.locate(bot.ID, sessionID, input.MessageID) < 0 {
 		s.mu.Unlock()
 		apiError(w, 404, "message_not_found")
 		return
@@ -289,7 +324,7 @@ func (s *chatStore) cancelReply(w http.ResponseWriter, r *http.Request) {
 	cancelled := false
 	// A cancel that names a round must only stop that round: a late stop from a finished
 	// attempt may never interrupt the retry that replaced it.
-	if active := s.active[bot.ID]; active != nil && active.messageID == input.MessageID &&
+	if active := s.active[key]; active != nil && active.messageID == input.MessageID &&
 		(input.RunID == "" || active.runID == input.RunID) {
 		active.cancelled = true
 		active.cancel()

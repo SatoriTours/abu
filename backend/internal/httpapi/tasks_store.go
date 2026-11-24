@@ -83,8 +83,8 @@ func (s *TaskAPI) persist(next []storedTask) bool {
 		s.storageFailed = true
 		if s.activeCancel != nil {
 			s.activeCancel()
-			if s.tasks[s.activeIndex].Status == "running" {
-				s.tasks[s.activeIndex].transition("interrupted", "", "storage_uncertain")
+			if i := s.find(s.activeBot, s.activeTask); i >= 0 && s.tasks[i].Status == "running" {
+				s.tasks[i].transition("interrupted", "", "storage_uncertain")
 			}
 		}
 		s.stop()

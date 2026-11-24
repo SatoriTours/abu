@@ -211,9 +211,9 @@ internal fun GeneratedCenter(
 internal fun GeneratedCard(content: @Composable ColumnScope.() -> Unit) {
     Surface(
         Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
-        shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(0.75.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(6.dp), content = content)
     }
@@ -265,27 +265,28 @@ private fun GenerationEditor(state: GeneratedUiState, form: GenerationForm, bots
         }
     }
     if (form.action == GenerationAction.NEW) {
-        OutlinedTextField(
-            form.name,
-            { if (it.length <= 320) state.setForm(form.copy(name = it)) },
-            Modifier.fillMaxWidth(),
-            label = { Text("小程序名称") },
+        AbuTextField(
+            value = form.name,
+            onValueChange = { if (it.length <= 320) state.setForm(form.copy(name = it)) },
+            modifier = Modifier.fillMaxWidth(),
+            label = "小程序名称",
+            placeholder = "例如：喝水记录、阅读清单",
             singleLine = true,
-            shape = RoundedCornerShape(14.dp),
             enabled = enabled,
-            supportingText = { Text("${form.name.codePointCount(0, form.name.length)} / 80 字符") },
+            supportingText = "${form.name.codePointCount(0, form.name.length)} / 80 字符",
         )
     }
-    OutlinedTextField(
-        form.request,
-        { if (it.length <= 16000) state.setForm(form.copy(request = it)) },
-        Modifier.fillMaxWidth(),
-        label = { Text("需求说明") },
+    AbuTextField(
+        value = form.request,
+        onValueChange = { if (it.length <= 16000) state.setForm(form.copy(request = it)) },
+        modifier = Modifier.fillMaxWidth(),
+        label = "需求说明",
+        placeholder = "描述你希望这个小程序有哪些功能与界面…",
+        singleLine = false,
         minLines = 4,
         maxLines = 12,
-        shape = RoundedCornerShape(14.dp),
         enabled = enabled,
-        supportingText = { Text("${form.request.codePointCount(0, form.request.length)} / 4000 字符") },
+        supportingText = "${form.request.codePointCount(0, form.request.length)} / 4000 字符",
     )
     Text(if (form.action == GenerationAction.SUGGEST)
         "只生成数据建议，不会写入。请核对改动后再确认。"

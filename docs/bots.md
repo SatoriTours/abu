@@ -9,10 +9,11 @@
 | `GET /api/bots` | 200 `{"bots":[...]}`，阿布置顶，其余按创建顺序 |
 | `POST /api/bots` | 请求 `{id,name,instructions,avatar}`；首次保存 201 + Bot，原创建内容重提交 200 + 当前 Bot |
 | `PUT /api/bots/{id}` | 请求 `{name,instructions,avatar,revision}`；匹配后 200 + Bot，revision 加 1 |
+| `DELETE /api/bots/{id}` | 200 `{"deleted":true,"id":...}`；禁止删除 `abu`，需无在途回复/排队或执行中任务/关联生成小程序；通过写前意图与增量回滚保证跨快照一致性 |
 
-Bot 包含 `id,name,instructions,avatar,revision`。冷启动缺少角色文件时只合成 `{"id":"abu","name":"阿布","instructions":"","avatar":"abu","revision":1}`，读取不写文件。只有阿布默认存在，可编辑但不可删除；其他角色均由用户创建。id 允许 1–128 个 ASCII 字母、数字、下划线、连字符，区分大小写；名称非空白、1–40 Unicode 码点；说明最多 4000 码点，空白说明不会送入模型。头像为 `abu/leaf/flame/wave/fluff`。总上限 32（含阿布），请求体上限 32 KiB。创建 revision 为 1，id 不可变。即使已编辑角色，原始创建字段的重提交仍幂等返回已保存的当前角色；同 id 异创建字段返回 409。编辑冲突须刷新、核对后显式再提交，不自动覆盖。
+Bot 包含 `id,name,instructions,avatar,revision`。冷启动缺少角色文件时只合成 `{"id":"abu","name":"阿布","instructions":"","avatar":"abu","revision":1}`，读取不写文件。只有阿布默认存在，可编辑但不可删除；其他角色均由用户创建，且支持删除（同时清理该角色的会话/聊天记录和已结束任务）。id 允许 1–128 个 ASCII 字母、数字、下划线、连字符，区分大小写；名称非空白、1–40 Unicode 码点；说明最多 4000 码点，空白说明不会送入模型。头像为 `abu/leaf/flame/wave/fluff`。总上限 32（含阿布），请求体上限 32 KiB。创建 revision 为 1，id 不可变。即使已编辑角色，原始创建字段的重提交仍幂等返回已保存的当前角色；同 id 异创建字段返回 409。编辑冲突须刷新、核对后显式再提交，不自动覆盖。
 
-错误响应 `{"error":"代码"}`：400 `invalid_bot`，401 `unauthorized`，404 `bot_not_found`，409 `id_conflict`、`revision_conflict` 或 `bot_limit`，413 `body_too_large`，503 `storage_unavailable`。角色库存储在 `ABU_DATA_DIR/bots.json`（默认从 backend/ 启动时为 `backend/data/bots.json`）。损坏时拒绝启动开发后端，不将损坏角色库当成全新的阿布；写入失败不改变已确认记录。
+错误响应 `{"error":"代码"}`：400 `invalid_bot`/`invalid_bot_id`，401 `unauthorized`，404 `bot_not_found`，409 `id_conflict`、`revision_conflict`、`bot_limit`、`cannot_delete_default_bot`、`bot_busy` 或 `bot_in_use`，413 `body_too_large`，503 `storage_unavailable`。角色库存储在 `ABU_DATA_DIR/bots.json`（默认从 backend/ 启动时为 `backend/data/bots.json`）。损坏时拒绝启动开发后端，不将损坏角色库当成全新的阿布；写入失败不改变已确认记录。
 
 ## 聊天及任务的 botId
 

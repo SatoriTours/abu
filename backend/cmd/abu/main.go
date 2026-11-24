@@ -1,15 +1,18 @@
-// Command abu runs a loopback-only development server.
+// Command abu runs the local development server.
 package main
 
 import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,7 +23,14 @@ import (
 
 func main() {
 	modelEnv := flag.String("model-env", "", "private model configuration file")
+	listen := flag.String("listen", "", "listen address, e.g. 127.0.0.1:8080 (default: ABU_LISTEN_ADDR or 127.0.0.1:8080)")
 	flag.Parse()
+	// Refuse an unusable address before any store is opened, so a typo cannot look like a
+	// running service on a different interface.
+	addr, err := listenAddress(*listen)
+	if err != nil {
+		log.Fatal(err)
+	}
 	cfg, enabled, err := model.LoadConfig(*modelEnv)
 	if err != nil {
 		log.Fatal(err)
@@ -38,7 +48,7 @@ func main() {
 		log.Fatal(err)
 	}
 	server := &http.Server{
-		Addr:              "127.0.0.1:8080",
+		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
@@ -48,6 +58,31 @@ func main() {
 	if err := serve(server, tasks); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// defaultListenAddr keeps the development server on the loopback interface unless the operator
+// asks for another address.
+const defaultListenAddr = "127.0.0.1:8080"
+
+// listenAddress resolves the listen address from the flag, then ABU_LISTEN_ADDR, then the
+// development default. Anything that is not a valid host:port is refused.
+func listenAddress(flagValue string) (string, error) {
+	addr := strings.TrimSpace(flagValue)
+	if addr == "" {
+		addr = strings.TrimSpace(os.Getenv("ABU_LISTEN_ADDR"))
+	}
+	if addr == "" {
+		addr = defaultListenAddr
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("invalid listen address %q: %w", addr, err)
+	}
+	number, convErr := strconv.Atoi(port)
+	if convErr != nil || number < 1 || number > 65535 {
+		return "", fmt.Errorf("invalid listen address %q: port must be 1-65535", addr)
+	}
+	return addr, nil
 }
 
 func newDevHandler(token, dir string, provider model.Completer) (http.Handler, *httpapi.TaskAPI, error) {
@@ -81,6 +116,18 @@ func newDevHandler(token, dir string, provider model.Completer) (http.Handler, *
 	if err != nil {
 		log.Print("tasks disabled: task storage could not be initialized; restore the snapshot and restart")
 		taskHandler = httpapi.NewUnavailableTaskHandler(token)
+		bots.DisableDelete()
+		// The unloadable store has no delete hook, so a role delete would silently skip the
+		// tasks it owns and could overwrite a pending intent. Refuse deletes until a healthy
+		// restart loads every store.
+	}
+	// Roll an interrupted role deletion forward now that every child store has loaded. With the
+	// task store unavailable the intent stays on disk for the next healthy start, so no child
+	// snapshot is left pointing at a removed role.
+	if err == nil {
+		if err := bots.RecoverPendingDelete(); err != nil {
+			return nil, nil, err
+		}
 	}
 	mux.Handle("/api/tasks", taskHandler)
 	mux.Handle("/api/tasks/", taskHandler)

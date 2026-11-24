@@ -61,65 +61,67 @@ func (g *Generated) createJob(w http.ResponseWriter, r *http.Request) {
 		genBad(w)
 		return
 	}
-	bot, ok := g.bots.resolve(w, j.BotID)
-	if !ok {
-		return
-	}
-	j.Instructions, j.Status = bot.Instructions, "queued"
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.broken {
-		genUnavailable(w)
-		return
-	}
-	if i := g.state.job(j.ID); i >= 0 {
-		old := g.state.Jobs[i]
-		if old.Kind != j.Kind || old.BotID != j.BotID || old.AppID != j.AppID || old.Request != j.Request ||
-			old.Name != j.Name || old.BaseVersion != j.BaseVersion || old.BaseRevision != j.BaseRevision {
-			apiError(w, 409, "id_conflict")
+	// The role read lock is held across the persisted job, so a concurrent role deletion cannot
+	// remove the role between the existence check and this write.
+	if status, code := g.bots.withBotReadLock(j.BotID, func(bot Bot) {
+		j.Instructions, j.Status = bot.Instructions, "queued"
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.broken {
+			genUnavailable(w)
 			return
 		}
-		writeJSON(w, 200, old.view())
-		return
-	}
-	if g.worker == nil || g.worker.workerCtx.Err() != nil || g.worker.provider == nil {
-		apiError(w, 503, "generation_unavailable")
-		return
-	}
-	if len(g.state.Jobs) >= genMaxJobs {
-		apiError(w, 409, "generated_job_limit")
-		return
-	}
-	idx := g.state.app(j.AppID)
-	switch {
-	case j.Kind == "proposal":
-		if idx < 0 {
+		if i := g.state.job(j.ID); i >= 0 {
+			old := g.state.Jobs[i]
+			if old.Kind != j.Kind || old.BotID != j.BotID || old.AppID != j.AppID || old.Request != j.Request ||
+				old.Name != j.Name || old.BaseVersion != j.BaseVersion || old.BaseRevision != j.BaseRevision {
+				apiError(w, 409, "id_conflict")
+				return
+			}
+			writeJSON(w, 200, old.view())
+			return
+		}
+		if g.worker == nil || g.worker.workerCtx.Err() != nil || g.worker.provider == nil {
+			apiError(w, 503, "generation_unavailable")
+			return
+		}
+		if len(g.state.Jobs) >= genMaxJobs {
+			apiError(w, 409, "generated_job_limit")
+			return
+		}
+		idx := g.state.app(j.AppID)
+		switch {
+		case j.Kind == "proposal":
+			if idx < 0 {
+				genMissing(w)
+				return
+			}
+			record := g.state.Apps[idx].Data
+			if record.Revision != j.BaseRevision {
+				apiError(w, 409, "revision_conflict")
+				return
+			}
+			j.InputDocument = record.Document
+		case j.BaseVersion == 0:
+			if idx >= 0 {
+				apiError(w, 409, "version_conflict")
+				return
+			}
+		case idx < 0 || g.state.version(g.state.Apps[idx], j.BaseVersion) == nil:
 			genMissing(w)
 			return
 		}
-		record := g.state.Apps[idx].Data
-		if record.Revision != j.BaseRevision {
-			apiError(w, 409, "revision_conflict")
+		next := g.state
+		next.Jobs = append(slices.Clone(next.Jobs), j)
+		if code := g.save(next); code != "" {
+			genSaveError(w, code)
 			return
 		}
-		j.InputDocument = record.Document
-	case j.BaseVersion == 0:
-		if idx >= 0 {
-			apiError(w, 409, "version_conflict")
-			return
-		}
-	case idx < 0 || g.state.version(g.state.Apps[idx], j.BaseVersion) == nil:
-		genMissing(w)
-		return
+		g.worker.notify()
+		writeJSON(w, 201, j.view())
+	}); code != "" {
+		apiError(w, status, code)
 	}
-	next := g.state
-	next.Jobs = append(slices.Clone(next.Jobs), j)
-	if code := g.save(next); code != "" {
-		genSaveError(w, code)
-		return
-	}
-	g.worker.notify()
-	writeJSON(w, 201, j.view())
 }
 
 func (g *Generated) jobs(w http.ResponseWriter, _ *http.Request) {

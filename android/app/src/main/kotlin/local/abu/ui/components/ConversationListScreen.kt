@@ -1,8 +1,9 @@
 package local.abu.ui.components
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -27,13 +28,16 @@ import local.abu.R
 import local.abu.ui.ChatSession
 import local.abu.ui.model.BotsState
 import local.abu.ui.model.ConversationItem
+import local.abu.ui.model.findMessageSnippet
 import local.abu.ui.model.formatPreview
 import local.abu.ui.model.formatRelativeChatTime
 import local.abu.ui.model.formatTimeGreeting
+import local.abu.ui.model.sortBotsByActivity
 import local.abu.ui.navigation.AppNavigationState
 import java.time.Instant
 import java.time.ZoneId
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun ConversationListScreen(
     nav: AppNavigationState, state: BotsState, chats: ChatSession,
@@ -43,6 +47,7 @@ internal fun ConversationListScreen(
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     var sectionMenuOpen by remember { mutableStateOf(false) }
+    var rowMenuBotId by remember { mutableStateOf<String?>(null) }
     var now by remember { mutableStateOf(Instant.now()) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -52,16 +57,27 @@ internal fun ConversationListScreen(
     }
     val zone = ZoneId.systemDefault()
     val greeting = formatTimeGreeting(now.atZone(zone).hour)
-    val rows = state.bots.mapNotNull { bot ->
+    val sortedBots = sortBotsByActivity(
+        state.bots,
+        state.bots.associate { bot -> bot.id to chats.forBot(bot.id).messages.lastOrNull()?.createdAt },
+    )
+    val query = nav.searchQuery.trim()
+    val rows = sortedBots.mapNotNull { bot ->
         val chat = chats.forBot(bot.id)
+        val searchableMessages = chats.allLoadedMessagesForBot(bot.id)
+        val snippet = if (query.isNotEmpty()) findMessageSnippet(searchableMessages, query) else null
+        val preview = snippet?.let { "命中：$it" } ?: formatPreview(chat.messages)
         val row = ConversationItem(
             bot.id,
             bot.name,
             bot.id == "abu",
-            formatPreview(chat.messages),
+            preview,
             formatRelativeChatTime(chat.messages.lastOrNull()?.createdAt, now = now, zone = zone),
         )
-        if (row.matchesQuery(nav.searchQuery) || bot.id == "abu" && nav.searchQuery.trim().equals("Abu", true)) {
+        val matchesMeta = row.matchesQuery(query) ||
+            bot.instructions.contains(query, ignoreCase = true) ||
+            (bot.id == "abu" && query.equals("Abu", true))
+        if (query.isEmpty() || matchesMeta || snippet != null) {
             Triple(bot, chat, row)
         } else null
     }
@@ -113,16 +129,16 @@ internal fun ConversationListScreen(
         }
         if (nav.searchOpen) item {
             Row(
-                Modifier.padding(bottom = 6.dp),
+                Modifier.padding(bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                OutlinedTextField(
-                    nav.searchQuery,
-                    nav::updateSearch,
-                    Modifier.weight(1f).focusRequester(focus),
-                    label = { Text("搜索对话") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
+                AbuSearchPill(
+                    value = nav.searchQuery,
+                    onValueChange = nav::updateSearch,
+                    placeholder = "搜索对话或历史消息…",
+                    contentDescription = "搜索对话",
+                    modifier = Modifier.weight(1f).focusRequester(focus),
                 )
                 TextButton(onClick = { keyboard?.hide(); nav.closeSearch() }) { Text("取消") }
             }
@@ -196,15 +212,19 @@ internal fun ConversationListScreen(
                     .background(Color.Transparent)
             }
             Column(Modifier.fillMaxWidth()) {
-                Row(
-                    containerModifier,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
+                Box {
                     Row(
-                        Modifier
-                            .weight(1f)
-                            .clickable { keyboard?.hide(); onChat(bot.id) }
-                            .padding(horizontal = 12.dp, vertical = 11.dp),
+                        containerModifier
+                            .combinedClickable(
+                                onClick = { keyboard?.hide(); onChat(bot.id) },
+                                onLongClick = {
+                                    if (!state.busy) {
+                                        keyboard?.hide()
+                                        rowMenuBotId = bot.id
+                                    }
+                                },
+                            )
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -238,55 +258,43 @@ internal fun ConversationListScreen(
                                     )
                                 }
                             }
-                            Row(
+                            Text(
+                                when {
+                                    working -> "正在生成回复…"
+                                    row.lastMessagePreview.isNotEmpty() -> row.lastMessagePreview
+                                    chat.busy -> "正在读取记录…"
+                                    chat.error != null -> "记录未读取，打开后可刷新"
+                                    chat.historyLoaded -> "还没有对话，来聊聊吧"
+                                    else -> "打开对话"
+                                },
                                 Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                Text(
-                                    when {
-                                        working -> "正在生成回复…"
-                                        row.lastMessagePreview.isNotEmpty() -> row.lastMessagePreview
-                                        chat.busy -> "正在读取记录…"
-                                        chat.error != null -> "记录未读取，打开后可刷新"
-                                        chat.historyLoaded -> "还没有对话，来聊聊吧"
-                                        else -> "打开对话"
-                                    },
-                                    Modifier.weight(1f),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = colors.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                if (row.isPinned || working) {
-                                    Box(
-                                        Modifier
-                                            .size(6.dp)
-                                            .clip(CircleShape)
-                                            .background(colors.primary),
-                                    )
-                                }
-                            }
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (working) colors.primary else colors.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     }
-                    IconButton(
-                        onClick = { keyboard?.hide(); nav.closeSearch(); state.startEdit(bot.id) },
-                        enabled = !state.busy,
-                        modifier = Modifier.padding(end = 2.dp),
+                    DropdownMenu(
+                        expanded = rowMenuBotId == bot.id,
+                        onDismissRequest = { rowMenuBotId = null },
                     ) {
-                        Icon(
-                            painterResource(R.drawable.ic_edit_bot),
-                            "编辑角色：${bot.name}",
-                            modifier = Modifier.size(17.dp),
-                            tint = colors.onSurfaceVariant.copy(alpha = 0.6f),
+                        DropdownMenuItem(
+                            text = { Text("编辑角色") },
+                            enabled = !state.busy,
+                            onClick = {
+                                rowMenuBotId = null
+                                nav.closeSearch()
+                                state.startEdit(bot.id)
+                            },
                         )
                     }
                 }
                 if (!row.isPinned && index < rows.lastIndex) {
                     HorizontalDivider(
-                        Modifier.padding(start = 70.dp, end = 12.dp),
+                        Modifier.padding(start = 72.dp, end = 14.dp),
                         thickness = 0.5.dp,
-                        color = colors.outlineVariant.copy(alpha = 0.25f),
+                        color = colors.outlineVariant.copy(alpha = 0.55f),
                     )
                 }
             }

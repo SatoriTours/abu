@@ -31,7 +31,11 @@ data class TaskList(val tasks: List<TaskRecord>, val modelConfigured: Boolean, v
 class TaskException(val code: String, val statusCode: Int? = null) : Exception(code)
 
 // The caller owns the redirect-disabled HTTP client (e.g. createHealthHttpClient on Android).
-class TaskClient(private val client: HttpClient) {
+class TaskClient(
+    private val client: HttpClient,
+    // Resolved per request so a changed setting reaches the client that already exists.
+    private val baseUrl: () -> String = { DEFAULT_SERVER_BASE_URL },
+) {
     init {
         require(client.pluginOrNull(HttpRedirect) == null) { "Task HTTP client must disable redirects" }
     }
@@ -77,7 +81,7 @@ class TaskClient(private val client: HttpClient) {
         allBots: Boolean = false,
         parse: (JsonObject) -> T,
     ): T = try {
-        client.prepareRequest(endpoint + path) {
+        client.prepareRequest(endpoint() + path) {
             method = verb
             expectSuccess = false
             bearerAuth(token)
@@ -119,6 +123,8 @@ class TaskClient(private val client: HttpClient) {
         throw TaskException("connection_failed")
     }
 
+    private fun endpoint(): String = baseUrl().trimEnd('/') + endpointPath
+
     private fun parseDetail(root: JsonObject, scope: String): TaskDetail =
         TaskDetail(parseRecord(root.getValue("task").jsonObject, scope), root.flag("modelConfigured"), root.flag("storageAvailable"))
 
@@ -145,7 +151,7 @@ class TaskClient(private val client: HttpClient) {
     private fun validateId(id: String): String = id.also { require(idPattern.matches(it)) { "Invalid task id" } }
 
     private companion object {
-        const val endpoint = "http://127.0.0.1:8080/api/tasks"
+        const val endpointPath = "/api/tasks"
         const val detailLimit = 64L * 1024
         const val listLimit = 10L * 1024 * 1024
         val idPattern = Regex("[A-Za-z0-9_-]{1,128}")

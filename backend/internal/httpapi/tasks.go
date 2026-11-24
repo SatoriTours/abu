@@ -53,20 +53,23 @@ type taskResponse struct {
 
 // TaskAPI owns the dev-only local task store and its single model worker.
 type TaskAPI struct {
-	mu            sync.Mutex
-	path          string
-	tasks         []storedTask
-	bots          *Bots
-	provider      model.Completer
-	timeout       time.Duration
-	draftTimeout  time.Duration
-	handler       http.Handler
-	wake          chan struct{}
-	done          chan struct{}
-	workerCtx     context.Context
-	stop          context.CancelFunc
-	activeCancel  context.CancelFunc
-	activeIndex   int
+	mu           sync.Mutex
+	path         string
+	tasks        []storedTask
+	bots         *Bots
+	provider     model.Completer
+	timeout      time.Duration
+	draftTimeout time.Duration
+	handler      http.Handler
+	wake         chan struct{}
+	done         chan struct{}
+	workerCtx    context.Context
+	stop         context.CancelFunc
+	activeCancel context.CancelFunc
+	// The running task is tracked by identity, never by slice index: a role deletion can
+	// remove earlier rows while the model call is unlocked.
+	activeBot     string
+	activeTask    string
 	storageFailed bool
 	generated     *Generated
 }
@@ -120,6 +123,9 @@ func newTaskAPI(path, token string, provider model.Completer, timeout, draftTime
 
 	if generated != nil {
 		generated.worker = api
+	}
+	if bots != nil {
+		bots.RegisterDeleteHook(api)
 	}
 	if provider != nil {
 		go api.run()
@@ -196,16 +202,18 @@ func (s *TaskAPI) create(w http.ResponseWriter, r *http.Request) {
 		taskError(w, http.StatusBadRequest, "invalid_task")
 		return
 	}
-	bot, ok := s.bots.resolve(w, bodyBotID(fields))
-	if !ok {
-		return
-	}
-	response, status, code := s.submit(bot, input.ID, input.Content)
-	if code != "" {
+	// The role read lock is held across the persisted task row, so a concurrent role deletion
+	// cannot remove the role between the existence check and this write.
+	if status, code := s.bots.withBotReadLock(bodyBotID(fields), func(bot Bot) {
+		response, status, code := s.submit(bot, input.ID, input.Content)
+		if code != "" {
+			taskError(w, status, code)
+			return
+		}
+		writeJSON(w, status, response)
+	}); code != "" {
 		taskError(w, status, code)
-		return
 	}
-	writeJSON(w, status, response)
 }
 
 func (s *TaskAPI) submit(bot Bot, id, content string) (taskResponse, int, string) {
@@ -287,6 +295,84 @@ func (s *TaskAPI) readOrCancel(botID, id string, cancel bool) (taskResponse, int
 
 func (s *TaskAPI) availability() taskAvailability {
 	return taskAvailability{s.provider != nil, !s.storageFailed}
+}
+
+// CheckBotDeletable refuses a role whose tasks are still queued or running, and reports a
+// faulted task store instead of deleting against data that cannot be rewritten.
+func (s *TaskAPI) CheckBotDeletable(botID string) (int, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.storageFailed {
+		return 503, "storage_unavailable"
+	}
+	for _, row := range s.tasks {
+		if row.BotID == botID && (row.Status == "queued" || row.Status == "running") {
+			return 409, "bot_busy"
+		}
+	}
+	return 0, ""
+}
+
+// PurgeBot removes every finished task of one role in a single atomic snapshot write and
+// returns a rollback that restores those rows. It writes the snapshot directly instead of
+// persist, so a purge fault does not poison the task store.
+func (s *TaskAPI) PurgeBot(botID string) (func() error, int, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.storageFailed {
+		return nil, 503, "storage_unavailable"
+	}
+	current := s.tasks
+	next := make([]storedTask, 0, len(current))
+	removed := make([]storedTask, 0, 4)
+	for _, row := range current {
+		if row.BotID == botID {
+			removed = append(removed, row)
+		} else {
+			next = append(next, row)
+		}
+	}
+	if len(removed) == 0 {
+		return nil, 0, ""
+	}
+	if err := saveJSONSnapshot(s.path, ".tasks-*", next); err != nil {
+		return nil, 503, "storage_unavailable"
+	}
+	s.tasks = next
+	return func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		// The store stays unlocked between the purge and this rollback, so the worker may have
+		// finished tasks of other roles meanwhile. Merge the purged rows back into the current
+		// snapshot instead of restoring the older full slice, which would drop those results.
+		merged := mergeStoredTasks(s.tasks, removed)
+		if err := saveJSONSnapshot(s.path, ".tasks-*", merged); err != nil {
+			return err
+		}
+		s.tasks = merged
+		return nil
+	}, 0, ""
+}
+
+// mergeStoredTasks puts the purged rows back into the current snapshot. Rows of other roles keep
+// their latest state untouched, and the result stays ordered by creation time as the store
+// expects.
+func mergeStoredTasks(current, removed []storedTask) []storedTask {
+	merged := slices.Clone(current)
+	for _, row := range removed {
+		if slices.ContainsFunc(merged, func(other storedTask) bool {
+			return other.BotID == row.BotID && other.ID == row.ID
+		}) {
+			continue
+		}
+		i := slices.IndexFunc(merged, func(other storedTask) bool { return other.CreatedAt.After(row.CreatedAt) })
+		if i < 0 {
+			merged = append(merged, row)
+			continue
+		}
+		merged = slices.Insert(merged, i, row)
+	}
+	return merged
 }
 
 func (s *TaskAPI) find(botID, id string) int {
@@ -381,7 +467,7 @@ func (s *TaskAPI) runNext() bool {
 	}
 	row := s.tasks[i]
 	ctx, cancel := context.WithTimeout(s.workerCtx, s.timeout)
-	s.activeIndex, s.activeCancel = i, cancel
+	s.activeBot, s.activeTask, s.activeCancel = row.BotID, row.ID, cancel
 	s.mu.Unlock()
 
 	var output string
@@ -395,8 +481,10 @@ func (s *TaskAPI) runNext() bool {
 	defer s.mu.Unlock()
 	defer cancel()
 	defer func() { s.activeCancel = nil }()
-	if s.tasks[i].Status != "running" {
-		return true // cancellation or a storage fault already owns the outcome
+	// The row may be gone or moved while the model call ran unlocked.
+	i = s.find(row.BotID, row.ID)
+	if i < 0 || s.tasks[i].Status != "running" {
+		return true // cancellation, removal or a storage fault already owns the outcome
 	}
 	switch {
 	case s.workerCtx.Err() != nil:

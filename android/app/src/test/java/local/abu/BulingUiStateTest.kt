@@ -1,11 +1,16 @@
 package local.abu
 
+import local.abu.data.Bot
+import local.abu.data.BotAvatar
+import local.abu.data.ChatMessage
+import local.abu.ui.model.findMessageSnippet
 import local.abu.ui.model.formatChatDayHeader
 import local.abu.ui.model.formatRelativeChatTime
 import local.abu.ui.model.formatShortClock
 import local.abu.ui.model.formatTimeGreeting
 import local.abu.ui.model.sendableChatText
 import local.abu.ui.model.shouldShowTimeHeader
+import local.abu.ui.model.sortBotsByActivity
 import local.abu.ui.theme.ThemeMode
 import local.abu.ui.theme.ThemePreference
 import java.time.Instant
@@ -92,5 +97,47 @@ class BulingUiStateTest {
         assertTrue(shouldShowTimeHeader("2026-11-24T09:35:00Z", "2026-11-24T09:41:00Z", zone))
         assertTrue(shouldShowTimeHeader("2026-11-23T23:59:00Z", "2026-11-24T00:01:00Z", zone))
         assertFalse(shouldShowTimeHeader("2026-11-24T09:35:00Z", "not-a-timestamp", zone))
+    }
+
+    @Test
+    fun sortBotsByActivityKeepsAbuPinnedAndOrdersOthersByLatestMessage() {
+        val abu = Bot("abu", "阿布", "", BotAvatar.ABU, 1)
+        val leaf = Bot("leaf", "小叶", "", BotAvatar.LEAF, 1)
+        val flame = Bot("flame", "小火", "", BotAvatar.FLAME, 1)
+        val wave = Bot("wave", "小浪", "", BotAvatar.WAVE, 1)
+        val sorted = sortBotsByActivity(
+            listOf(abu, leaf, flame, wave),
+            mapOf(
+                "abu" to "2026-11-20T08:00:00Z",
+                "leaf" to null,
+                "flame" to "2026-11-24T12:00:00Z",
+                "wave" to "2026-11-24T18:30:00Z",
+            ),
+        )
+        assertEquals(listOf("abu", "wave", "flame", "leaf"), sorted.map { it.id })
+
+        val withoutHistory = sortBotsByActivity(
+            listOf(abu, leaf, flame),
+            mapOf("leaf" to "bad-ts", "flame" to null),
+        )
+        assertEquals(listOf("abu", "leaf", "flame"), withoutHistory.map { it.id })
+    }
+
+    @Test
+    fun findMessageSnippetSearchesHistoryNewestFirstAndTruncatesLongMatches() {
+        val messages = listOf(
+            ChatMessage("m1", "早期讨论咖啡豆", "2026-11-24T08:00:00Z", reply = "旧回复", replyStatus = "completed"),
+            ChatMessage("m2", "无关内容", "2026-11-24T09:00:00Z", reply = "这是最新回复里提到的深度烘焙咖啡豆方案", replyStatus = "completed"),
+        )
+        assertNull(findMessageSnippet(messages, "   "))
+        assertNull(findMessageSnippet(messages, "不存在的关键词"))
+        assertEquals("这是最新回复里提到的深度烘焙咖啡豆方案", findMessageSnippet(messages, "咖啡豆"))
+
+        val longMsg = listOf(
+            ChatMessage("m3", "前缀".repeat(20) + "关键目标词" + "后缀".repeat(20), "2026-11-24T10:00:00Z"),
+        )
+        val snippet = assertNotNull(findMessageSnippet(longMsg, "关键目标词", maxLength = 20))
+        assertTrue(snippet.contains("关键目标词"))
+        assertTrue(snippet.startsWith("…") && snippet.endsWith("…"))
     }
 }

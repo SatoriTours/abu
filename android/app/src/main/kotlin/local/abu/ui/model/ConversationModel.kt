@@ -1,5 +1,6 @@
 package local.abu.ui.model
 
+import local.abu.data.Bot
 import local.abu.data.ChatMessage
 import java.time.DateTimeException
 import java.time.Duration
@@ -20,6 +21,48 @@ data class ConversationItem(
         if (q.isEmpty()) return true
         return name.contains(q, ignoreCase = true) || lastMessagePreview.contains(q, ignoreCase = true)
     }
+}
+
+internal fun sortBotsByActivity(
+    bots: List<Bot>,
+    lastMessageAtByBot: Map<String, String?>,
+): List<Bot> {
+    val indexed = bots.withIndex()
+    return indexed.sortedWith(
+        compareBy<IndexedValue<Bot>>(
+            { if (it.value.id == "abu") 0 else 1 },
+            { if (parseInstantOrNull(lastMessageAtByBot[it.value.id]) != null) 0 else 1 },
+        ).thenByDescending { parseInstantOrNull(lastMessageAtByBot[it.value.id]) ?: Instant.EPOCH }
+            .thenBy { it.index },
+    ).map { it.value }
+}
+
+internal fun findMessageSnippet(
+    messages: List<ChatMessage>,
+    query: String,
+    maxLength: Int = 44,
+): String? {
+    val needle = query.trim()
+    if (needle.isEmpty()) return null
+    for (msg in messages.asReversed()) {
+        val sources = listOf(msg.reply, msg.content)
+        for (source in sources) {
+            if (source.isBlank()) continue
+            val normalized = source.replace(Regex("\\s+"), " ").trim()
+            val hit = normalized.indexOf(needle, ignoreCase = true)
+            if (hit >= 0) {
+                if (normalized.length <= maxLength) return normalized
+                val half = ((maxLength - needle.length).coerceAtLeast(8)) / 2
+                val start = (hit - half).coerceAtLeast(0)
+                val end = (start + maxLength).coerceAtMost(normalized.length)
+                val adjustedStart = (end - maxLength).coerceAtLeast(0)
+                val prefix = if (adjustedStart > 0) "…" else ""
+                val suffix = if (end < normalized.length) "…" else ""
+                return prefix + normalized.substring(adjustedStart, end) + suffix
+            }
+        }
+    }
+    return null
 }
 
 private val FullTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm")
@@ -111,5 +154,20 @@ fun formatPreview(messages: List<ChatMessage>): String {
     val last = messages.last()
     val answered = last.reply.isNotBlank() &&
         (last.replyStatus == "completed" || last.replyStatus == "interrupted")
-    return if (answered) last.reply else last.content
+    val raw = if (answered) last.reply else last.content
+    val firstLine = raw.lineSequence()
+        .map { it.trim() }
+        .firstOrNull { it.isNotEmpty() }
+        .orEmpty()
+    return firstLine
+        .replace(Regex("^>+\\s+"), "")
+        .replace(Regex("^#{1,6}\\s+"), "")
+        .replace(Regex("^(?:[-*+]|\\d+[.)])\\s+"), "")
+        .replace("**", "")
+        .replace("~~", "")
+        .replace("`", "")
+        .replace(Regex("\\*([^*]+)\\*"), "$1")
+        .replace(Regex("(?<![\\w])_([^_]+)_(?![\\w])"), "$1")
+        .trim()
+        .ifEmpty { raw.trim() }
 }

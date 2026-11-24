@@ -25,6 +25,7 @@ internal class BotsState(
     private val create: suspend (String, Bot) -> Bot,
     private val update: suspend (String, Bot) -> Bot,
     private val newId: () -> String = { UUID.randomUUID().toString() },
+    private val delete: suspend (String, String) -> Unit = { _, _ -> throw BotsException("http_error") },
 ) {
     var bots by mutableStateOf(emptyList<Bot>())
         private set
@@ -46,6 +47,8 @@ internal class BotsState(
         private set
     private var original by mutableStateOf<Bot?>(null)
     val editingExisting get() = original != null
+    val editingBotId get() = original?.id
+    val canDelete get() = editing && editingExisting && !busy && original?.id != "abu"
     val hasToken get() = activeToken.isNotBlank()
     val dirty get() = fields != (original?.toFields() ?: BotFields())
     val canCreate get() = hasToken && loaded && !busy && bots.size < 32
@@ -129,6 +132,21 @@ internal class BotsState(
         error = null
     }
 
+    suspend fun deleteEditing(): String? {
+        val target = original ?: return null
+        if (!canDelete) return null
+        var deletedId: String? = null
+        request { token, apply ->
+            delete(token, target.id)
+            apply {
+                bots = bots.filterNot { it.id == target.id }
+                deletedId = target.id
+                resetEditor()
+            }
+        }
+        return deletedId
+    }
+
     private fun resetEditor() {
         editing = false
         fields = BotFields()
@@ -165,7 +183,11 @@ internal class BotsState(
                     "storage_unavailable" -> "角色库不可写，草稿已保留。"
                     "bot_limit" -> "角色总数已达到 32 个。"
                     "id_conflict" -> "角色编号冲突，请刷新核对后再决定是否放弃。"
-                    "invalid_bot", "body_too_large" -> "角色内容不符合限制。"
+                    "cannot_delete_default_bot" -> "主助手阿布不能删除。"
+                    "bot_busy" -> "该角色正在生成回复或有排队/执行中的任务，请稍后再删除。"
+                    "bot_in_use" -> "该角色关联了已生成的小程序记录，暂不能删除。"
+                    "bot_not_found" -> "角色已不存在，请刷新列表。"
+                    "invalid_bot", "invalid_bot_id", "body_too_large" -> "角色内容不符合限制。"
                     else -> "角色请求未确认，请检查连接后重试。"
                 }
             }

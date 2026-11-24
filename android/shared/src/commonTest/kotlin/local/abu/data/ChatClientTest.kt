@@ -257,6 +257,73 @@ class ChatClientTest {
         }
     }
 
+    @Test fun regenerateFlagIsOnlySentWhenAsked() = runBlocking<Unit> {
+        val bodies = mutableListOf<String>()
+        HttpClient(MockEngine { request ->
+            bodies.add((request.body as TextContent).text)
+            if (request.url.encodedPath.endsWith("/stream")) {
+                respond(
+                    "event: done\ndata: {\"id\":\"1\",\"content\":\"hi\",\"createdAt\":\"now\"," +
+                        "\"reply\":\"好\",\"replyStatus\":\"completed\"}\n\n",
+                    HttpStatusCode.OK, sse(),
+                )
+            } else {
+                respond(
+                    "{\"id\":\"1\",\"content\":\"hi\",\"createdAt\":\"now\",\"reply\":\"好\",\"replyStatus\":\"completed\"}",
+                    HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+            }
+        }).use {
+            val client = ChatClient(it)
+            assertEquals("好", client.reply("t", "1", false).reply)
+            assertEquals("好", client.reply("t", "1", false, regenerate = true).reply)
+            assertEquals("好", client.replyStream("t", "1", false, regenerate = true) {}.reply)
+        }
+        // An omitted flag keeps the old request byte-for-byte.
+        assertEquals("{\"messageId\":\"1\",\"retry\":false}", bodies[0])
+        assertTrue(bodies[1].contains("\"regenerate\":true"), bodies[1])
+        assertTrue(bodies[2].contains("\"regenerate\":true"), bodies[2])
+    }
+
+    @Test fun editMessagePutsTheNewestTurn() = runBlocking<Unit> {
+        HttpClient(MockEngine { request ->
+            assertEquals(HttpMethod.Put, request.method)
+            assertEquals("/api/chat/messages/abc", request.url.encodedPath)
+            assertEquals("{\"content\":\"改过\"}", (request.body as TextContent).text)
+            respond(
+                "{\"id\":\"abc\",\"content\":\"改过\",\"createdAt\":\"now\",\"botId\":\"abu\"}",
+                HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }).use {
+            val edited = ChatClient(it).editMessage("t", "abc", "改过")
+            assertEquals("改过", edited.content)
+            assertEquals("", edited.reply)
+        }
+        var calls = 0
+        HttpClient(MockEngine { calls++; respond("{}", HttpStatusCode.OK) }).use {
+            val client = ChatClient(it)
+            for (bad in listOf("", "a/b", "a?b", "a b", ".")) {
+                assertEquals("invalid_message",
+                    assertFailsWith<ChatException> { client.editMessage("t", bad, "x") }.code)
+            }
+        }
+        assertEquals(0, calls)
+    }
+
+    @Test fun notLatestMessageExplainsTheEditRule() = runBlocking<Unit> {
+        HttpClient(MockEngine {
+            respond("{\"error\":\"not_latest_message\"}", HttpStatusCode.Conflict,
+                headersOf(HttpHeaders.ContentType, "application/json"))
+        }).use {
+            val failure = assertFailsWith<ChatException> {
+                ChatClient(it).editMessage("t", "abc", "改过")
+            }
+            assertEquals("not_latest_message", failure.code)
+            assertEquals(409, failure.statusCode)
+            assertEquals("仅支持编辑当前角色的最新一条消息", failure.message)
+        }
+    }
+
     @Test fun replyStreamDoesNotSwallowCancellationOfAnErrorBody() = runBlocking<Unit> {
         // A non-200 response whose error body can no longer be read must still report the
         // cancellation to the caller instead of a chat error.
@@ -267,5 +334,216 @@ class ChatClientTest {
         }).use {
             assertFailsWith<CancellationException> { ChatClient(it).replyStream("t", "1", false) {} }
         }
+    }
+    private val jsonHeaders = headersOf(HttpHeaders.ContentType, "application/json")
+    private val workSession =
+        """{"id":"work","botId":"abu","title":"工作","createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-02T00:00:00Z"}"""
+    private val defaultSession =
+        """{"id":"default","botId":"abu","title":"默认对话","createdAt":"","updatedAt":""}"""
+
+    @Test fun sessionCrudUsesSessionRoutes() = runBlocking {
+        val calls = mutableListOf<String>()
+        HttpClient(MockEngine { request ->
+            val body = (request.body as? TextContent)?.text ?: ""
+            calls.add(request.method.value + " " + request.url.encodedPath + "?" + request.url.encodedQuery + "|" + body)
+            when {
+                request.method == HttpMethod.Get ->
+                    respond("{\"sessions\":[" + defaultSession + "," + workSession + "]}", HttpStatusCode.OK, jsonHeaders)
+                request.method == HttpMethod.Post ->
+                    respond(workSession, HttpStatusCode.Created, jsonHeaders)
+                request.method == HttpMethod.Put ->
+                    respond(workSession.replace("工作", "工作台"), HttpStatusCode.OK, jsonHeaders)
+                else -> respond(
+                    """{"deleted":true,"id":"work","botId":"abu","deletedMessages":3}""",
+                    HttpStatusCode.OK, jsonHeaders,
+                )
+            }
+        }).use { http ->
+            val client = ChatClient(http)
+            val sessions = client.listSessions("t", "abu")
+            assertEquals(listOf("default", "work"), sessions.map { it.id })
+            assertEquals("默认对话", sessions[0].title)
+            assertEquals("work", client.createSession("t", "work", "工作", "abu").id)
+            assertEquals("工作台", client.renameSession("t", "work", "工作台", "abu").title)
+            assertEquals(3, client.deleteSession("t", "work", "abu"))
+        }
+        assertEquals(
+            listOf(
+                "GET /api/chat/sessions?botId=abu|",
+                "POST /api/chat/sessions?|" + """{"id":"work","title":"工作","botId":"abu"}""",
+                "PUT /api/chat/sessions/work?|" + """{"title":"工作台","botId":"abu"}""",
+                "DELETE /api/chat/sessions/work?botId=abu|",
+            ),
+            calls,
+        )
+    }
+
+    @Test fun loadHistorySendsPagingAndParsesTheCursor() = runBlocking {
+        var query: Parameters? = null
+        HttpClient(MockEngine { request ->
+            query = request.url.parameters
+            respond(
+                """{"messages":[{"id":"m-1","content":"hi","createdAt":"now","botId":"abu","sessionId":"work"}],""" +
+                    """"modelConfigured":true,"sessionId":"work","hasMore":true,"nextBefore":"m-1"}""",
+                HttpStatusCode.OK, jsonHeaders,
+            )
+        }).use { http ->
+            val page = ChatClient(http).loadHistory("t", "abu", "work", before = "m-9", limit = 2)
+            assertEquals("work", page.sessionId)
+            assertTrue(page.hasMore)
+            assertEquals("m-1", page.nextBefore)
+            assertEquals("work", page.messages.single().sessionId)
+        }
+        val params = requireNotNull(query)
+        assertEquals("abu", params["botId"])
+        assertEquals("work", params["sessionId"])
+        assertEquals("m-9", params["before"])
+        assertEquals("2", params["limit"])
+    }
+
+    @Test fun anOldHistoryResponseStaysCompatible() = runBlocking {
+        HttpClient(MockEngine {
+            respond(
+                """{"messages":[{"id":"1","content":"hello","createdAt":"now","botId":"abu"}],"modelConfigured":false}""",
+                HttpStatusCode.OK, jsonHeaders,
+            )
+        }).use {
+            val page = ChatClient(it).loadHistory("t", "abu")
+            assertEquals(DEFAULT_SESSION_ID, page.sessionId)
+            assertFalse(page.hasMore)
+            assertNull(page.nextBefore)
+            assertEquals(DEFAULT_SESSION_ID, page.messages.single().sessionId)
+        }
+    }
+
+    @Test fun aPageFromAnotherSessionIsRejected() = runBlocking {
+        HttpClient(MockEngine {
+            respond(
+                """{"messages":[],"modelConfigured":false,"sessionId":"default"}""",
+                HttpStatusCode.OK, jsonHeaders,
+            )
+        }).use {
+            val failure = assertFailsWith<ChatException> { ChatClient(it).loadHistory("t", "abu", "work") }
+            assertEquals("invalid_response", failure.code)
+        }
+    }
+
+    @Test fun sessionErrorsCarryClearMessages() = runBlocking {
+        for ((status, code) in listOf(
+            HttpStatusCode.BadRequest to "invalid_session",
+            HttpStatusCode.BadRequest to "invalid_session_id",
+            HttpStatusCode.NotFound to "session_not_found",
+            HttpStatusCode.Conflict to "session_limit",
+            HttpStatusCode.Conflict to "cannot_delete_default_session",
+        )) {
+            HttpClient(MockEngine {
+                respond("{\"error\":\"" + code + "\"}", status, jsonHeaders)
+            }).use {
+                val failure = assertFailsWith<ChatException> { ChatClient(it).listSessions("t") }
+                assertEquals(code, failure.code)
+                assertTrue(failure.message!!.isNotBlank())
+                assertNotEquals("服务暂不可用（HTTP " + status.value + "），请重试", failure.message)
+            }
+        }
+    }
+
+    @Test fun omittedSessionKeepsRequestsBackwardCompatible() = runBlocking {
+        val bodies = mutableListOf<String>()
+        val queries = mutableListOf<String>()
+        HttpClient(MockEngine { request ->
+            bodies.add((request.body as? TextContent)?.text ?: "")
+            queries.add(request.url.encodedQuery)
+            when {
+                request.url.encodedPath == "/api/chat/replies/stream" -> respond(
+                    "event: done\ndata: {\"id\":\"1\",\"content\":\"hi\",\"createdAt\":\"now\"," +
+                        "\"reply\":\"好\",\"replyStatus\":\"completed\"}\n\n",
+                    HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/event-stream"),
+                )
+                request.method == HttpMethod.Get -> respond(
+                    """{"messages":[],"modelConfigured":false}""", HttpStatusCode.OK, jsonHeaders,
+                )
+                else -> respond(
+                    """{"id":"1","content":"hi","createdAt":"now"}""", HttpStatusCode.OK, jsonHeaders,
+                )
+            }
+        }).use { http ->
+            val client = ChatClient(http)
+            client.send("t", "1", "hi")
+            client.replyStream("t", "1", false) {}
+            client.loadHistory("t")
+        }
+        assertEquals("""{"id":"1","content":"hi"}""", bodies[0])
+        assertEquals("""{"messageId":"1","retry":false}""", bodies[1])
+        assertEquals("", queries[1])
+        assertEquals("", bodies[2])
+    }
+
+    @Test fun sessionScopeIsSentWithMessagesAndReplies() = runBlocking {
+        val bodies = mutableListOf<String>()
+        HttpClient(MockEngine { request ->
+            bodies.add((request.body as? TextContent)?.text ?: "")
+            val path = request.url.encodedPath
+            when {
+                path == "/api/chat/replies/stream" -> respond(
+                    "event: done\ndata: {\"id\":\"1\",\"content\":\"hi\",\"createdAt\":\"now\"," +
+                        "\"reply\":\"好\",\"replyStatus\":\"completed\",\"sessionId\":\"work\"}\n\n",
+                    HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/event-stream"),
+                )
+                request.method == HttpMethod.Delete -> respond(
+                    """{"deletedCount":1,"botId":"abu","sessionId":"work"}""", HttpStatusCode.OK, jsonHeaders,
+                )
+                else -> respond(
+                    """{"id":"1","content":"hi","createdAt":"now","sessionId":"work"}""",
+                    HttpStatusCode.OK, jsonHeaders,
+                )
+            }
+        }).use { http ->
+            val client = ChatClient(http)
+            assertEquals("work", client.send("t", "1", "hi", null, "work").sessionId)
+            assertEquals("work", client.reply("t", "1", false, null, null, false, "work").sessionId)
+            assertEquals("work", client.replyStream("t", "1", false, null, null, false, "work") {}.sessionId)
+            assertEquals(1, client.clearMessages("t", null, "work"))
+        }
+        assertTrue(bodies[0].contains("\"sessionId\":\"work\""), bodies[0])
+        assertTrue(bodies[1].contains("\"sessionId\":\"work\""), bodies[1])
+        assertTrue(bodies[2].contains("\"sessionId\":\"work\""), bodies[2])
+    }
+
+    @Test fun invalidSessionInputIsRejectedBeforeAnyRequest() = runBlocking {
+        var calls = 0
+        HttpClient(MockEngine { calls++; respond("{}", HttpStatusCode.OK) }).use { http ->
+            val client = ChatClient(http)
+            for (bad in listOf("", "a b", "a/b", "x".repeat(129))) {
+                assertEquals(
+                    "invalid_session_id",
+                    assertFailsWith<ChatException> { client.deleteSession("t", bad) }.code,
+                )
+                assertEquals(
+                    "invalid_session_id",
+                    assertFailsWith<ChatException> { client.loadHistory("t", "abu", bad) }.code,
+                )
+            }
+            assertEquals(
+                "invalid_session",
+                assertFailsWith<ChatException> { client.createSession("t", "work", "   ") }.code,
+            )
+            assertEquals(
+                "invalid_session",
+                assertFailsWith<ChatException> { client.createSession("t", "work", "字".repeat(61)) }.code,
+            )
+            assertEquals(
+                "invalid_session",
+                assertFailsWith<ChatException> { client.renameSession("t", "work", "") }.code,
+            )
+            assertEquals(
+                "invalid_session",
+                assertFailsWith<ChatException> { client.createSession("t", DEFAULT_SESSION_ID) }.code,
+            )
+            assertEquals(
+                "invalid_message",
+                assertFailsWith<ChatException> { client.loadHistory("t", "abu", null, limit = 201) }.code,
+            )
+        }
+        assertEquals(0, calls)
     }
 }

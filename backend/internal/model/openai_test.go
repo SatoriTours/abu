@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestCompleteProtocol(t *testing.T) {
@@ -383,9 +384,9 @@ func TestCompleteStreamRejectsIncompleteStreams(t *testing.T) {
 }
 
 func TestCompleteStreamRejectsOverlongAndInvalidOutput(t *testing.T) {
-	long := strings.Repeat("好", 2000)
+	long := strings.Repeat("好", 3000)
 	client := newStreamClient(t, func(w http.ResponseWriter, r *http.Request) {
-		for i := 0; i < 3; i++ {
+		for i := 0; i < 6; i++ {
 			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q}}]}\n\n", long)
 		}
 		_, _ = io.WriteString(w, "data: [DONE]\n\n")
@@ -397,6 +398,64 @@ func TestCompleteStreamRejectsOverlongAndInvalidOutput(t *testing.T) {
 		if _, err := client.CompleteStream(context.Background(), messages, nil); err == nil {
 			t.Fatal("invalid input accepted")
 		}
+	}
+}
+
+func TestCompleteStreamAcceptsLongReplyWithinBudget(t *testing.T) {
+	chunk := strings.Repeat("好", 4000)
+	client := newStreamClient(t, func(w http.ResponseWriter, r *http.Request) {
+		quoted, err := json.Marshal(chunk)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		line := fmt.Sprintf(`{"choices":[{"delta":{"content":%s}}]}`, quoted)
+		for i := 0; i < 3; i++ {
+			fmt.Fprintf(w, "data: %s\n\n", line)
+		}
+		tailQuoted, err := json.Marshal(strings.Repeat("好", MaxReplyRunes-12000))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		tail := fmt.Sprintf(`{"choices":[{"delta":{"content":%s},"finish_reason":"stop"}]}`, tailQuoted)
+		fmt.Fprintf(w, "data: %s\n\n", tail)
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	})
+	got, err := client.CompleteStream(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil || utf8.RuneCountInString(got) != MaxReplyRunes {
+		t.Fatalf("runes=%d err=%v", utf8.RuneCountInString(got), err)
+	}
+}
+
+func TestAssistantHistoryAllowsLongReply(t *testing.T) {
+	hits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+	client, err := NewOpenAI(Config{BaseURL: server.URL, Model: "m", APIKey: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A long assistant turn must be accepted back as context, but user text stays bounded.
+	messages := []Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: strings.Repeat("好", MaxReplyRunes)},
+	}
+	if got, err := client.Complete(context.Background(), messages); err != nil || got != "ok" {
+		t.Fatalf("long assistant history rejected: %q %v", got, err)
+	}
+	messages[1].Content = strings.Repeat("好", MaxReplyRunes+1)
+	if _, err = client.Complete(context.Background(), messages); err == nil {
+		t.Fatal("over budget assistant history accepted")
+	}
+	if _, err = client.Complete(context.Background(), []Message{{Role: "user", Content: strings.Repeat("好", 4001)}}); err == nil {
+		t.Fatal("over budget user text accepted")
+	}
+	if hits != 1 {
+		t.Fatalf("provider contacted %d times", hits)
 	}
 }
 

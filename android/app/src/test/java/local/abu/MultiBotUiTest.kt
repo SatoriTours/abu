@@ -126,4 +126,54 @@ class MultiBotUiTest {
         assertEquals(listOf(Triple("new","draft A","a"),Triple("new","draft A","a")),creates)
         assertEquals("draft B",state.draft)
     }
+
+    @Test fun deleteBotRemovesCustomBotProtectsAbuAndMapsErrors() = runTest {
+        val abu = Bot("abu", "阿布", "", BotAvatar.ABU, 1)
+        val leaf = Bot("leaf", "小叶", "整理", BotAvatar.LEAF, 1)
+        val flame = Bot("flame", "小火", "写作", BotAvatar.FLAME, 1)
+        var failCode: String? = null
+        val deleted = mutableListOf<String>()
+        val state = BotsState(
+            load = { listOf(abu, leaf, flame) },
+            create = { _, b -> b },
+            update = { _, b -> b },
+            delete = { _, id ->
+                failCode?.let { throw BotsException(it, 409) }
+                deleted += id
+            },
+        )
+        state.setToken("token")
+        state.refresh()
+
+        // Default bot abu cannot be deleted in editor.
+        state.startEdit("abu")
+        assertFalse(state.canDelete)
+        assertNull(state.deleteEditing())
+        state.discardEditor()
+
+        // Error mapping preserves editor and shows clear reason.
+        state.startEdit("leaf")
+        assertTrue(state.canDelete)
+        failCode = "bot_busy"
+        assertNull(state.deleteEditing())
+        assertTrue(state.error?.contains("正在生成回复") == true)
+        assertTrue(state.editing)
+
+        failCode = "bot_in_use"
+        assertNull(state.deleteEditing())
+        assertTrue(state.error?.contains("小程序") == true)
+
+        // Successful deletion removes the bot and closes editor.
+        failCode = null
+        assertEquals("leaf", state.deleteEditing())
+        assertEquals(listOf("leaf"), deleted)
+        assertFalse(state.editing)
+        assertEquals(listOf("abu", "flame"), state.bots.map { it.id })
+
+        // ChatSession.removeBot clears local bot state cleanly.
+        val session = ChatSession("token")
+        session.forBot("leaf").draft = "old"
+        session.removeBot("leaf")
+        assertEquals("", session.forBot("leaf").draft)
+    }
 }
