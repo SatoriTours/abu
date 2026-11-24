@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -22,11 +23,24 @@ type Message struct {
 	Reply       string `json:"reply,omitempty"`
 	ReplyStatus string `json:"replyStatus,omitempty"`
 }
+
+// activeReply tracks the single in-flight generation of one bot so that a client can
+// cancel it without holding the store lock across the model call.
+type activeReply struct {
+	messageID string
+	// runID is the caller-supplied round identifier. A cancel request that names a different
+	// round must not stop this generation.
+	runID     string
+	cancel    context.CancelFunc
+	cancelled bool
+}
+
 type chatStore struct {
 	mu         sync.Mutex
 	path       string
 	messages   []Message
 	generating map[string]bool
+	active     map[string]*activeReply
 	provider   model.Completer
 	bots       *Bots
 }
@@ -44,7 +58,10 @@ func NewChatHandlerWithBots(path, token string, provider model.Completer, bots *
 	if len(token) < 32 {
 		return nil, errors.New("ABU_DEV_TOKEN must contain at least 32 bytes")
 	}
-	store := &chatStore{path: path, messages: []Message{}, provider: provider, bots: bots, generating: map[string]bool{}}
+	store := &chatStore{
+		path: path, messages: []Message{}, provider: provider, bots: bots,
+		generating: map[string]bool{}, active: map[string]*activeReply{},
+	}
 	f, err := os.Open(path)
 	if err == nil {
 		defer f.Close()
@@ -79,8 +96,12 @@ func NewChatHandlerWithBots(path, token string, provider model.Completer, bots *
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/chat/replies", store.reply)
+	mux.HandleFunc("POST /api/chat/replies/stream", store.replyStream)
+	mux.HandleFunc("POST /api/chat/replies/cancel", store.cancelReply)
 	mux.HandleFunc("GET /api/chat/messages", store.history)
 	mux.HandleFunc("POST /api/chat/messages", store.createMessage)
+	mux.HandleFunc("DELETE /api/chat/messages", store.clearMessages)
+	mux.HandleFunc("DELETE /api/chat/messages/{id}", store.deleteMessage)
 	return requireDevToken(token, mux), nil
 }
 
@@ -179,6 +200,84 @@ func (s *chatStore) createMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	s.messages = next
 	writeJSON(w, 201, message)
+}
+
+// locate returns the index of one message inside the role scope. Callers hold s.mu.
+func (s *chatStore) locate(botID, messageID string) int {
+	for i, m := range s.messages {
+		if m.BotID == botID && m.ID == messageID {
+			return i
+		}
+	}
+	return -1
+}
+
+func (s *chatStore) deleteMessage(w http.ResponseWriter, r *http.Request) {
+	botID, _, ok := queryBotID(r, false)
+	if !ok {
+		apiError(w, 400, "invalid_bot_id")
+		return
+	}
+	bot, ok := s.bots.resolve(w, botID)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" || len(id) > 128 {
+		apiError(w, 400, "invalid_message")
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.generating[bot.ID] {
+		apiError(w, 409, "reply_in_progress")
+		return
+	}
+	index := s.locate(bot.ID, id)
+	if index < 0 {
+		apiError(w, 404, "message_not_found")
+		return
+	}
+	next := append(append([]Message{}, s.messages[:index]...), s.messages[index+1:]...)
+	if err := s.save(next); err != nil {
+		apiError(w, 500, "storage_failed")
+		return
+	}
+	s.messages = next
+	writeJSON(w, 200, map[string]any{"deleted": true, "id": id, "botId": bot.ID})
+}
+
+func (s *chatStore) clearMessages(w http.ResponseWriter, r *http.Request) {
+	botID, _, ok := queryBotID(r, false)
+	if !ok {
+		apiError(w, 400, "invalid_bot_id")
+		return
+	}
+	bot, ok := s.bots.resolve(w, botID)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.generating[bot.ID] {
+		apiError(w, 409, "reply_in_progress")
+		return
+	}
+	next := make([]Message, 0, len(s.messages))
+	for _, m := range s.messages {
+		if m.BotID != bot.ID {
+			next = append(next, m)
+		}
+	}
+	count := len(s.messages) - len(next)
+	if count > 0 {
+		if err := s.save(next); err != nil {
+			apiError(w, 500, "storage_failed")
+			return
+		}
+		s.messages = next
+	}
+	writeJSON(w, 200, map[string]any{"deletedCount": count, "botId": bot.ID})
 }
 
 func requireDevToken(token string, next http.Handler) http.Handler {

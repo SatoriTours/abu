@@ -33,9 +33,7 @@ fun formatPreview(messages: List<ChatMessage>): String {
         return ""
     }
     val last = messages.last()
-    return if (last.replyStatus == "completed" && last.reply.isNotBlank()) {
-        last.reply
-    } else {
-        last.content
-    }
+    val answered = last.reply.isNotBlank() &&
+        (last.replyStatus == "completed" || last.replyStatus == "interrupted")
+    return if (answered) last.reply else last.content
 }
